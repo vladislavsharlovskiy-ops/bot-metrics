@@ -7,12 +7,13 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 
-from stages import BY_CODE, FUNNEL, LOST, SOURCES, next_stage
+from stages import BY_CODE, FUNNEL, IGNORING, LOST, SOURCES, next_stage
 
 
 # Текст кнопок главного меню — используются и для отрисовки, и для роутинга.
 BTN_NEW       = "➕ Новый лид"
 BTN_LEADS     = "📋 Активные"
+BTN_IGNORING  = "🤐 Игнорят"
 BTN_TODAY     = "📊 Сегодня"
 BTN_WEEK      = "📅 Неделя"
 BTN_MONTH     = "📆 Месяц"
@@ -24,7 +25,7 @@ BTN_DASHBOARD = "🌐 Дашборд"
 def main_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=BTN_NEW), KeyboardButton(text=BTN_LEADS)],
+            [KeyboardButton(text=BTN_NEW), KeyboardButton(text=BTN_LEADS), KeyboardButton(text=BTN_IGNORING)],
             [KeyboardButton(text=BTN_TODAY), KeyboardButton(text=BTN_WEEK), KeyboardButton(text=BTN_MONTH)],
             [KeyboardButton(text=BTN_CHANNELS), KeyboardButton(text=BTN_FUNNEL)],
             [KeyboardButton(text=BTN_DASHBOARD)],
@@ -54,19 +55,54 @@ def skip_kb(field: str) -> InlineKeyboardMarkup:
 
 def lead_card_kb(lead_id: int, stage: str) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    nxt = next_stage(stage)
-    if nxt:
+    if stage == IGNORING:
         rows.append([InlineKeyboardButton(
-            text=f"→ {nxt.title}",
-            callback_data=f"adv:{lead_id}",
+            text="▶️ Снять «игнорит»",
+            callback_data=f"unignore:{lead_id}",
         )])
-    rows.append([InlineKeyboardButton(text="📝 Заметка", callback_data=f"note:{lead_id}")])
+    else:
+        nxt = next_stage(stage)
+        if nxt:
+            rows.append([InlineKeyboardButton(
+                text=f"→ {nxt.title}",
+                callback_data=f"adv:{lead_id}",
+            )])
+    rows.append([
+        InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"edit:{lead_id}"),
+        InlineKeyboardButton(text="📝 Заметка",      callback_data=f"note:{lead_id}"),
+    ])
+    side: list[InlineKeyboardButton] = []
+    if stage not in (LOST, IGNORING):
+        side.append(InlineKeyboardButton(text="🤐 Игнорит",      callback_data=f"ignore:{lead_id}"))
     if stage != LOST:
-        rows.append([InlineKeyboardButton(text="❌ Лид отвалился", callback_data=f"lost:{lead_id}")])
+        side.append(InlineKeyboardButton(text="❌ Отвалился",    callback_data=f"lost:{lead_id}"))
+    if side:
+        rows.append(side)
     rows.append([
         InlineKeyboardButton(text="📋 К списку", callback_data="leads:1"),
-        InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del:{lead_id}"),
+        InlineKeyboardButton(text="🗑 Удалить",  callback_data=f"del:{lead_id}"),
     ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def edit_field_kb(lead_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Имя",     callback_data=f"editf:{lead_id}:name")],
+            [InlineKeyboardButton(text="Логин",   callback_data=f"editf:{lead_id}:username")],
+            [InlineKeyboardButton(text="Источник",callback_data=f"editf:{lead_id}:source")],
+            [InlineKeyboardButton(text="Запрос",  callback_data=f"editf:{lead_id}:request")],
+            [InlineKeyboardButton(text="Отмена",  callback_data=f"open:{lead_id}")],
+        ]
+    )
+
+
+def edit_source_kb(lead_id: int) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text=title, callback_data=f"editsrc:{lead_id}:{code}")]
+        for code, title in SOURCES
+    ]
+    rows.append([InlineKeyboardButton(text="Отмена", callback_data=f"open:{lead_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

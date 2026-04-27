@@ -10,6 +10,7 @@ PAID = "paid"
 CONSULTED = "consulted"
 PACKAGE_BOUGHT = "package_bought"
 LOST = "lost"
+IGNORING = "ignoring"
 
 
 @dataclass(frozen=True)
@@ -30,10 +31,12 @@ FUNNEL: list[Stage] = [
 ]
 
 LOST_STAGE = Stage(LOST, "Лид отвалился", "Отвал")
+IGNORING_STAGE = Stage(IGNORING, "Игнорит", "Игнор")
 
-BY_CODE: dict[str, Stage] = {s.code: s for s in [*FUNNEL, LOST_STAGE]}
+BY_CODE: dict[str, Stage] = {s.code: s for s in [*FUNNEL, LOST_STAGE, IGNORING_STAGE]}
 
 ACTIVE_CODES = {LEAD_NEW, QUALIFIED, BREAKDOWN_SENT, AGREED, PAID, CONSULTED}
+IGNORING_CODES = {IGNORING}
 
 
 def next_stage(current: str) -> Stage | None:

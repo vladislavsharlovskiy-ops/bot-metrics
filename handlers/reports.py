@@ -27,6 +27,7 @@ from stages import (
     BY_CODE,
     CONSULTED,
     FUNNEL,
+    IGNORING,
     LEAD_NEW,
     LOST,
     PACKAGE_BOUGHT,
@@ -194,8 +195,10 @@ async def cmd_funnel(message: Message) -> None:
         lines.append(f"{s.title}: <b>{n}</b>")
         total_active += n
     lost = by_stage.get(LOST, 0)
+    ignoring = by_stage.get(IGNORING, 0)
     lines.append("")
     lines.append(f"Всего в воронке: <b>{total_active}</b>")
+    lines.append(f"Игнорят: <b>{ignoring}</b>")
     lines.append(f"Отвалилось: {lost}")
     await message.answer("\n".join(lines))
 

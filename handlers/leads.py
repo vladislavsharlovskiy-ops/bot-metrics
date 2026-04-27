@@ -9,10 +9,13 @@ from sqlalchemy import or_, select
 
 from db import get_session
 from keyboards import (
+    BTN_IGNORING,
     BTN_LEADS,
     BTN_NEW,
     confirm_delete_kb,
     confirm_lost_kb,
+    edit_field_kb,
+    edit_source_kb,
     lead_card_kb,
     leads_list_kb,
     skip_kb,
@@ -23,6 +26,8 @@ from sheets import sync_all, sync_lead
 from stages import (
     ACTIVE_CODES,
     BY_CODE,
+    IGNORING,
+    IGNORING_CODES,
     LEAD_NEW,
     LOST,
     SOURCE_TITLES,
@@ -46,6 +51,18 @@ class EditNote(StatesGroup):
 
 class LostReason(StatesGroup):
     waiting = State()
+
+
+class EditField(StatesGroup):
+    waiting = State()
+
+
+# Поля, которые можно редактировать через текстовый ввод
+EDITABLE_TEXT_FIELDS = {
+    "name":     "имя",
+    "username": "логин",
+    "request":  "запрос",
+}
 
 
 def _format_lead(lead: Lead) -> str:
@@ -381,6 +398,173 @@ async def msg_note_save(message: Message, state: FSMContext) -> None:
             await message.answer("Лид не найден.")
             return
         lead.notes = message.text.strip()
+        session.commit()
+        session.refresh(lead)
+    sync_lead(lead.id)
+    await state.clear()
+    await message.answer(_format_lead(lead), reply_markup=lead_card_kb(lead.id, lead.stage))
+
+
+# ───────── ignoring ─────────
+
+@router.message(Command("ignoring"))
+@router.message(F.text == BTN_IGNORING)
+async def cmd_ignoring(message: Message) -> None:
+    with get_session() as session:
+        rows = session.execute(
+            select(Lead)
+            .where(Lead.stage.in_(IGNORING_CODES))
+            .order_by(Lead.updated_at.desc())
+            .limit(PAGE_SIZE * 5)  # игноров обычно немного, можно показать побольше
+        ).scalars().all()
+    if not rows:
+        await message.answer("Игнорящих лидов нет — все на связи 🙌")
+        return
+    items = [
+        (lead.id, f"#{lead.id} · {SOURCE_TITLES.get(lead.source, lead.source)} · "
+                  f"{lead.name or lead.username or '—'}")
+        for lead in rows
+    ]
+    text = f"🤐 <b>Игнорят:</b> {len(rows)}\n<i>Зайди в карточку → «Снять игнор», когда выйдут на связь.</i>"
+    await message.answer(text, reply_markup=leads_list_kb(items, 1, False))
+
+
+@router.callback_query(F.data.startswith("ignore:"))
+async def cb_ignore(call: CallbackQuery) -> None:
+    lead_id = int(call.data.split(":", 1)[1])
+    with get_session() as session:
+        lead = session.get(Lead, lead_id)
+        if lead is None:
+            await call.answer("Лид не найден", show_alert=True)
+            return
+        if lead.stage == IGNORING:
+            await call.answer("Уже в «игнорит»", show_alert=True)
+            return
+        lead.stage = IGNORING
+        session.add(StageHistory(lead_id=lead.id, stage=IGNORING))
+        session.commit()
+        session.refresh(lead)
+    sync_lead(lead.id)
+    await call.message.edit_text(_format_lead(lead), reply_markup=lead_card_kb(lead.id, lead.stage))
+    await call.answer("Помечен как «игнорит»")
+
+
+@router.callback_query(F.data.startswith("unignore:"))
+async def cb_unignore(call: CallbackQuery) -> None:
+    lead_id = int(call.data.split(":", 1)[1])
+    with get_session() as session:
+        lead = session.get(Lead, lead_id)
+        if lead is None:
+            await call.answer("Лид не найден", show_alert=True)
+            return
+        if lead.stage != IGNORING:
+            await call.answer("Лид не в «игнорит»", show_alert=True)
+            return
+        # Возвращаем на последний этап до перехода в IGNORING
+        prev = session.execute(
+            select(StageHistory)
+            .where(StageHistory.lead_id == lead_id)
+            .where(StageHistory.stage != IGNORING)
+            .order_by(StageHistory.changed_at.desc())
+            .limit(1)
+        ).scalars().first()
+        target_stage = prev.stage if prev else LEAD_NEW
+        lead.stage = target_stage
+        session.add(StageHistory(lead_id=lead.id, stage=target_stage))
+        session.commit()
+        session.refresh(lead)
+    sync_lead(lead.id)
+    target_title = BY_CODE[target_stage].title if target_stage in BY_CODE else target_stage
+    await call.message.edit_text(_format_lead(lead), reply_markup=lead_card_kb(lead.id, lead.stage))
+    await call.answer(f"Возвращён → {target_title}")
+
+
+# ───────── edit lead fields ─────────
+
+@router.callback_query(F.data.startswith("edit:"))
+async def cb_edit(call: CallbackQuery) -> None:
+    lead_id = int(call.data.split(":", 1)[1])
+    with get_session() as session:
+        lead = session.get(Lead, lead_id)
+    if lead is None:
+        await call.answer("Лид не найден", show_alert=True)
+        return
+    await call.message.edit_text(
+        f"✏️ Редактирование лида #{lead_id}\nЧто меняем?",
+        reply_markup=edit_field_kb(lead_id),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("editf:"))
+async def cb_edit_field(call: CallbackQuery, state: FSMContext) -> None:
+    _, lead_id_s, field = call.data.split(":", 2)
+    lead_id = int(lead_id_s)
+    if field == "source":
+        await call.message.edit_text(
+            f"Новый источник для лида #{lead_id}?",
+            reply_markup=edit_source_kb(lead_id),
+        )
+        await call.answer()
+        return
+    if field not in EDITABLE_TEXT_FIELDS:
+        await call.answer("Неизвестное поле", show_alert=True)
+        return
+    label = EDITABLE_TEXT_FIELDS[field]
+    await state.set_state(EditField.waiting)
+    await state.update_data(lead_id=lead_id, field=field)
+    await call.message.edit_text(
+        f"Пришлите новое значение для поля «{label}» (или /cancel для отмены).\n"
+        f"<i>Чтобы очистить поле — пришлите «-».</i>"
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("editsrc:"))
+async def cb_edit_source_save(call: CallbackQuery) -> None:
+    _, lead_id_s, code = call.data.split(":", 2)
+    lead_id = int(lead_id_s)
+    if code not in SOURCE_TITLES:
+        await call.answer("Неизвестный источник", show_alert=True)
+        return
+    with get_session() as session:
+        lead = session.get(Lead, lead_id)
+        if lead is None:
+            await call.answer("Лид не найден", show_alert=True)
+            return
+        lead.source = code
+        session.commit()
+        session.refresh(lead)
+    sync_lead(lead.id)
+    await call.message.edit_text(_format_lead(lead), reply_markup=lead_card_kb(lead.id, lead.stage))
+    await call.answer(f"Источник → {SOURCE_TITLES[code]}")
+
+
+@router.message(EditField.waiting, Command("cancel"))
+async def msg_edit_cancel(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    await state.clear()
+    if "lead_id" in data:
+        await _send_lead_card(message, data["lead_id"])
+
+
+@router.message(EditField.waiting)
+async def msg_edit_save(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    lead_id = data.get("lead_id")
+    field = data.get("field")
+    if lead_id is None or field not in EDITABLE_TEXT_FIELDS:
+        await state.clear()
+        return
+    raw = message.text.strip()
+    new_value: str | None = None if raw == "-" else raw
+    with get_session() as session:
+        lead = session.get(Lead, lead_id)
+        if lead is None:
+            await state.clear()
+            await message.answer("Лид не найден.")
+            return
+        setattr(lead, field, new_value)
         session.commit()
         session.refresh(lead)
     sync_lead(lead.id)

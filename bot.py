@@ -49,6 +49,7 @@ class OwnerOnlyMiddleware(BaseMiddleware):
 BOT_COMMANDS = [
     BotCommand(command="new",      description="➕ Новый лид"),
     BotCommand(command="leads",    description="📋 Активные лиды"),
+    BotCommand(command="ignoring", description="🤐 Лиды в «игнорит»"),
     BotCommand(command="today",    description="📊 Сегодня"),
     BotCommand(command="week",     description="📊 Неделя"),
     BotCommand(command="month",    description="📊 Месяц"),
