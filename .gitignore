@@ -1,0 +1,15 @@
+.env
+*.db
+*.db-journal
+*.log
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.DS_Store
+.idea/
+.vscode/
+.claude/
+bin/
+

@@ -1,0 +1,422 @@
+from __future__ import annotations
+
+from aiogram import F, Router
+from aiogram.filters import Command, CommandObject
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import CallbackQuery, Message
+from sqlalchemy import or_, select
+
+from db import get_session
+from keyboards import (
+    BTN_LEADS,
+    BTN_NEW,
+    confirm_delete_kb,
+    confirm_lost_kb,
+    lead_card_kb,
+    leads_list_kb,
+    skip_kb,
+    sources_kb,
+)
+from models import Lead, StageHistory
+from sheets import sync_all, sync_lead
+from stages import (
+    ACTIVE_CODES,
+    BY_CODE,
+    LEAD_NEW,
+    LOST,
+    SOURCE_TITLES,
+    next_stage,
+)
+
+router = Router()
+PAGE_SIZE = 10
+
+
+class NewLead(StatesGroup):
+    source = State()
+    name = State()
+    username = State()
+    request = State()
+
+
+class EditNote(StatesGroup):
+    waiting = State()
+
+
+class LostReason(StatesGroup):
+    waiting = State()
+
+
+def _format_lead(lead: Lead) -> str:
+    stage = BY_CODE.get(lead.stage)
+    stage_title = stage.title if stage else lead.stage
+    src = SOURCE_TITLES.get(lead.source, lead.source)
+    parts = [
+        f"<b>Лид #{lead.id}</b>",
+        f"Этап: <b>{stage_title}</b>",
+        f"Источник: {src}",
+        f"Имя: {lead.name or '—'}",
+        f"Логин: {lead.username or '—'}",
+    ]
+    if lead.request:
+        parts.append(f"Запрос: {lead.request}")
+    if lead.notes:
+        parts.append(f"Заметка: {lead.notes}")
+    if lead.stage == LOST and lead.lost_reason:
+        parts.append(f"Причина отвала: {lead.lost_reason}")
+    parts.append(f"Создан: {lead.created_at:%d.%m.%Y %H:%M}")
+    return "\n".join(parts)
+
+
+# ───────── /new wizard ─────────
+
+@router.message(Command("new"))
+@router.message(F.text == BTN_NEW)
+async def cmd_new(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await state.set_state(NewLead.source)
+    await message.answer("Откуда пришла заявка?", reply_markup=sources_kb())
+
+
+@router.callback_query(F.data == "new:cancel")
+async def new_cancel(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await call.message.edit_text("Создание лида отменено.")
+    await call.answer()
+
+
+@router.callback_query(NewLead.source, F.data.startswith("src:"))
+async def new_source(call: CallbackQuery, state: FSMContext) -> None:
+    code = call.data.split(":", 1)[1]
+    if code not in SOURCE_TITLES:
+        await call.answer("Неизвестный источник", show_alert=True)
+        return
+    await state.update_data(source=code)
+    await state.set_state(NewLead.name)
+    await call.message.edit_text(
+        f"Источник: <b>{SOURCE_TITLES[code]}</b>\n\nИмя клиента?",
+        reply_markup=skip_kb("name"),
+    )
+    await call.answer()
+
+
+@router.callback_query(NewLead.name, F.data == "skip:name")
+async def new_skip_name(call: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(name=None)
+    await state.set_state(NewLead.username)
+    await call.message.edit_text("Telegram-логин клиента (например, @ivan)?", reply_markup=skip_kb("username"))
+    await call.answer()
+
+
+@router.message(NewLead.name)
+async def new_name(message: Message, state: FSMContext) -> None:
+    await state.update_data(name=message.text.strip())
+    await state.set_state(NewLead.username)
+    await message.answer("Telegram-логин клиента (например, @ivan)?", reply_markup=skip_kb("username"))
+
+
+@router.callback_query(NewLead.username, F.data == "skip:username")
+async def new_skip_username(call: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(username=None)
+    await state.set_state(NewLead.request)
+    await call.message.edit_text("Кратко запрос/боль клиента?", reply_markup=skip_kb("request"))
+    await call.answer()
+
+
+@router.message(NewLead.username)
+async def new_username(message: Message, state: FSMContext) -> None:
+    await state.update_data(username=message.text.strip())
+    await state.set_state(NewLead.request)
+    await message.answer("Кратко запрос/боль клиента?", reply_markup=skip_kb("request"))
+
+
+@router.callback_query(NewLead.request, F.data == "skip:request")
+async def new_skip_request(call: CallbackQuery, state: FSMContext) -> None:
+    lead = await _save_lead(state, request=None)
+    await state.clear()
+    await call.message.edit_text(_format_lead(lead), reply_markup=lead_card_kb(lead.id, lead.stage))
+    await call.answer("Лид создан")
+
+
+@router.message(NewLead.request)
+async def new_request(message: Message, state: FSMContext) -> None:
+    lead = await _save_lead(state, request=message.text.strip())
+    await state.clear()
+    await message.answer(_format_lead(lead), reply_markup=lead_card_kb(lead.id, lead.stage))
+
+
+async def _save_lead(state: FSMContext, request: str | None) -> Lead:
+    data = await state.get_data()
+    with get_session() as session:
+        lead = Lead(
+            name=data.get("name"),
+            username=data.get("username"),
+            source=data["source"],
+            request=request,
+            stage=LEAD_NEW,
+        )
+        session.add(lead)
+        session.flush()
+        session.add(StageHistory(lead_id=lead.id, stage=LEAD_NEW))
+        session.commit()
+        session.refresh(lead)
+    sync_lead(lead.id)
+    return lead
+
+
+# ───────── /leads list ─────────
+
+@router.message(Command("leads"))
+@router.message(F.text == BTN_LEADS)
+async def cmd_leads(message: Message) -> None:
+    await _show_leads_page(message_or_call=message, page=1)
+
+
+@router.callback_query(F.data.startswith("leads:"))
+async def cb_leads(call: CallbackQuery) -> None:
+    page = int(call.data.split(":", 1)[1])
+    await _show_leads_page(message_or_call=call, page=page)
+
+
+async def _show_leads_page(message_or_call: Message | CallbackQuery, page: int) -> None:
+    offset = (page - 1) * PAGE_SIZE
+    with get_session() as session:
+        rows = session.execute(
+            select(Lead)
+            .where(Lead.stage.in_(ACTIVE_CODES))
+            .order_by(Lead.updated_at.desc())
+            .offset(offset)
+            .limit(PAGE_SIZE + 1)
+        ).scalars().all()
+
+    has_next = len(rows) > PAGE_SIZE
+    rows = rows[:PAGE_SIZE]
+
+    if not rows and page == 1:
+        text = "Активных лидов пока нет.\nСоздайте первого через /new."
+        if isinstance(message_or_call, CallbackQuery):
+            await message_or_call.message.edit_text(text)
+            await message_or_call.answer()
+        else:
+            await message_or_call.answer(text)
+        return
+
+    items = [
+        (
+            lead.id,
+            f"#{lead.id} · {SOURCE_TITLES.get(lead.source, lead.source)} · "
+            f"{lead.name or lead.username or '—'} · {BY_CODE[lead.stage].short}",
+        )
+        for lead in rows
+    ]
+    text = f"Активные лиды (стр. {page}):"
+    kb = leads_list_kb(items, page, has_next)
+    if isinstance(message_or_call, CallbackQuery):
+        await message_or_call.message.edit_text(text, reply_markup=kb)
+        await message_or_call.answer()
+    else:
+        await message_or_call.answer(text, reply_markup=kb)
+
+
+# ───────── /lead <id> and search ─────────
+
+@router.message(Command("lead"))
+async def cmd_lead(message: Message, command: CommandObject) -> None:
+    arg = (command.args or "").strip()
+    if not arg:
+        await message.answer("Используйте: /lead <id> или /find <имя_или_логин>")
+        return
+    if not arg.isdigit():
+        await message.answer("ID должен быть числом. Для поиска по имени используйте /find")
+        return
+    await _send_lead_card(message, int(arg))
+
+
+@router.message(Command("find"))
+async def cmd_find(message: Message, command: CommandObject) -> None:
+    q = (command.args or "").strip()
+    if not q:
+        await message.answer("Используйте: /find <часть имени или логина>")
+        return
+    pattern = f"%{q}%"
+    with get_session() as session:
+        rows = session.execute(
+            select(Lead)
+            .where(or_(Lead.name.ilike(pattern), Lead.username.ilike(pattern)))
+            .order_by(Lead.updated_at.desc())
+            .limit(PAGE_SIZE)
+        ).scalars().all()
+    if not rows:
+        await message.answer("Ничего не найдено.")
+        return
+    items = [
+        (lead.id, f"#{lead.id} · {lead.name or lead.username or '—'} · {BY_CODE[lead.stage].short}")
+        for lead in rows
+    ]
+    await message.answer(f"Найдено {len(rows)}:", reply_markup=leads_list_kb(items, 1, False))
+
+
+@router.callback_query(F.data.startswith("open:"))
+async def cb_open_lead(call: CallbackQuery) -> None:
+    lead_id = int(call.data.split(":", 1)[1])
+    with get_session() as session:
+        lead = session.get(Lead, lead_id)
+    if lead is None:
+        await call.answer("Лид не найден", show_alert=True)
+        return
+    await call.message.edit_text(_format_lead(lead), reply_markup=lead_card_kb(lead.id, lead.stage))
+    await call.answer()
+
+
+async def _send_lead_card(message: Message, lead_id: int) -> None:
+    with get_session() as session:
+        lead = session.get(Lead, lead_id)
+    if lead is None:
+        await message.answer(f"Лид #{lead_id} не найден.")
+        return
+    await message.answer(_format_lead(lead), reply_markup=lead_card_kb(lead.id, lead.stage))
+
+
+# ───────── advance / lost / note ─────────
+
+@router.callback_query(F.data.startswith("adv:"))
+async def cb_advance(call: CallbackQuery) -> None:
+    lead_id = int(call.data.split(":", 1)[1])
+    with get_session() as session:
+        lead = session.get(Lead, lead_id)
+        if lead is None:
+            await call.answer("Лид не найден", show_alert=True)
+            return
+        nxt = next_stage(lead.stage)
+        if nxt is None:
+            await call.answer("Этап уже финальный", show_alert=True)
+            return
+        lead.stage = nxt.code
+        session.add(StageHistory(lead_id=lead.id, stage=nxt.code))
+        session.commit()
+        session.refresh(lead)
+    sync_lead(lead.id)
+    await call.message.edit_text(_format_lead(lead), reply_markup=lead_card_kb(lead.id, lead.stage))
+    await call.answer(f"→ {nxt.short}")
+
+
+@router.callback_query(F.data.startswith("lost:"))
+async def cb_lost_ask(call: CallbackQuery, state: FSMContext) -> None:
+    lead_id = int(call.data.split(":", 1)[1])
+    await state.set_state(LostReason.waiting)
+    await state.update_data(lead_id=lead_id)
+    await call.message.edit_text(
+        f"Причина отвала лида #{lead_id}? Напишите текст или нажмите «Без причины».",
+        reply_markup=confirm_lost_kb(lead_id),
+    )
+    await call.answer()
+
+
+@router.callback_query(LostReason.waiting, F.data.startswith("lost_no:"))
+async def cb_lost_no_reason(call: CallbackQuery, state: FSMContext) -> None:
+    lead_id = int(call.data.split(":", 1)[1])
+    await _mark_lost(lead_id, reason=None)
+    await state.clear()
+    with get_session() as session:
+        lead = session.get(Lead, lead_id)
+    await call.message.edit_text(_format_lead(lead), reply_markup=lead_card_kb(lead.id, lead.stage))
+    await call.answer("Помечен как отвал")
+
+
+@router.message(LostReason.waiting)
+async def msg_lost_reason(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    lead_id = data.get("lead_id")
+    if lead_id is None:
+        await state.clear()
+        return
+    await _mark_lost(lead_id, reason=message.text.strip())
+    await state.clear()
+    with get_session() as session:
+        lead = session.get(Lead, lead_id)
+    await message.answer(_format_lead(lead), reply_markup=lead_card_kb(lead.id, lead.stage))
+
+
+async def _mark_lost(lead_id: int, reason: str | None) -> None:
+    with get_session() as session:
+        lead = session.get(Lead, lead_id)
+        if lead is None:
+            return
+        lead.stage = LOST
+        lead.lost_reason = reason
+        session.add(StageHistory(lead_id=lead.id, stage=LOST))
+        session.commit()
+    sync_lead(lead_id)
+
+
+@router.callback_query(F.data.startswith("note:"))
+async def cb_note_ask(call: CallbackQuery, state: FSMContext) -> None:
+    lead_id = int(call.data.split(":", 1)[1])
+    await state.set_state(EditNote.waiting)
+    await state.update_data(lead_id=lead_id)
+    await call.message.edit_text(f"Пришлите новую заметку для лида #{lead_id} (или /cancel).")
+    await call.answer()
+
+
+@router.message(EditNote.waiting, Command("cancel"))
+async def msg_note_cancel(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    await state.clear()
+    if "lead_id" in data:
+        await _send_lead_card(message, data["lead_id"])
+
+
+@router.message(EditNote.waiting)
+async def msg_note_save(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    lead_id = data.get("lead_id")
+    if lead_id is None:
+        await state.clear()
+        return
+    with get_session() as session:
+        lead = session.get(Lead, lead_id)
+        if lead is None:
+            await state.clear()
+            await message.answer("Лид не найден.")
+            return
+        lead.notes = message.text.strip()
+        session.commit()
+        session.refresh(lead)
+    sync_lead(lead.id)
+    await state.clear()
+    await message.answer(_format_lead(lead), reply_markup=lead_card_kb(lead.id, lead.stage))
+
+
+# ───────── delete lead ─────────
+
+@router.callback_query(F.data.startswith("del:"))
+async def cb_delete_ask(call: CallbackQuery) -> None:
+    lead_id = int(call.data.split(":", 1)[1])
+    with get_session() as session:
+        lead = session.get(Lead, lead_id)
+    if lead is None:
+        await call.answer("Лид уже удалён", show_alert=True)
+        return
+    title = lead.name or lead.username or f"#{lead.id}"
+    await call.message.edit_text(
+        f"⚠️ Удалить лид <b>{title}</b> навсегда?\n\n"
+        f"Все данные и история этапов будут стёрты. Это действие необратимо.",
+        reply_markup=confirm_delete_kb(lead_id),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("del_yes:"))
+async def cb_delete_confirm(call: CallbackQuery) -> None:
+    lead_id = int(call.data.split(":", 1)[1])
+    with get_session() as session:
+        lead = session.get(Lead, lead_id)
+        if lead is None:
+            await call.answer("Лид уже удалён", show_alert=True)
+            return
+        title = lead.name or lead.username or f"#{lead.id}"
+        session.delete(lead)
+        session.commit()
+    await call.message.edit_text(f"🗑 Лид <b>{title}</b> удалён.")
+    await call.answer("Удалено")
