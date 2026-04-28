@@ -77,7 +77,9 @@
       <div x-show="!funnelHasData" class="text-center text-slate-400 text-sm py-8">
         Нет событий за этот период
       </div>
-      <canvas x-show="funnelHasData" id="funnelChart" height="220"></canvas>
+      <div x-show="funnelHasData">
+        <canvas id="funnelChart" height="220"></canvas>
+      </div>
     </div>
 
     <div class="bg-white rounded-xl border border-slate-200 p-3 sm:p-5 shadow-sm">
@@ -375,7 +377,7 @@ function dash() {
       const r = await fetch('/api/channels');
       const d = await r.json();
       this.channels = d.channels;
-      this.renderChannelsChart();
+      this.$nextTick(() => this.renderChannelsChart());
     },
 
     async loadLeads() {
@@ -397,7 +399,7 @@ function dash() {
         this.funnel = { stages: d.stages, lost: 0 };
         this.periodData = d;
       }
-      this.renderFunnelChart();
+      this.$nextTick(() => this.renderFunnelChart());
     },
 
     setPeriod(p) {
