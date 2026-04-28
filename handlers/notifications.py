@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Router
 from aiogram.filters import Command
@@ -29,6 +30,7 @@ DIGEST_HOUR = 9
 DIGEST_MINUTE = 0
 STUCK_DAYS = 2
 DIGEST_STAGES = {BREAKDOWN_SENT}
+MSK = ZoneInfo("Europe/Moscow")
 
 
 def _stuck_leads() -> list[Lead]:
@@ -110,7 +112,7 @@ async def cmd_digest(message: Message, bot: Bot) -> None:
 
 
 def _seconds_until_next_run() -> float:
-    now = datetime.now()
+    now = datetime.now(MSK)
     target = now.replace(hour=DIGEST_HOUR, minute=DIGEST_MINUTE, second=0, microsecond=0)
     if target <= now:
         target += timedelta(days=1)
@@ -121,7 +123,7 @@ async def digest_loop(bot: Bot) -> None:
     """Бесконечный цикл: спим до ближайших 9:00, отправляем, повторяем."""
     while True:
         wait = _seconds_until_next_run()
-        log.info("Next digest in %.0f minutes (at %02d:%02d)", wait / 60, DIGEST_HOUR, DIGEST_MINUTE)
+        log.info("Next digest in %.0f minutes (at %02d:%02d МСК)", wait / 60, DIGEST_HOUR, DIGEST_MINUTE)
         try:
             await asyncio.sleep(wait)
             await send_digest(bot)
