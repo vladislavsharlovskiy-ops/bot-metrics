@@ -1,14 +1,10 @@
 from __future__ import annotations
 
 import logging
-import os
-import shutil
-import sqlite3
-import tempfile
 from datetime import datetime, time, timedelta
 from pathlib import Path
 
-from flask import Flask, abort, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request
 from sqlalchemy import func, or_, select
 
 from db import get_session
@@ -433,32 +429,6 @@ def api_create():
         session.refresh(lead)
     _try_sheets_sync(lead.id)
     return jsonify({"lead": _lead_dict(lead)})
-
-
-@app.post("/admin/import-db")
-def admin_import_db():
-    """One-shot DB upload. Auth: X-Bot-Token header must equal BOT_TOKEN.
-    Body: raw bytes of bot.db. To be removed in next commit after migration."""
-    if request.headers.get("X-Bot-Token", "") != os.environ.get("BOT_TOKEN", ""):
-        abort(401)
-    body = request.get_data()
-    if not body:
-        return jsonify({"error": "empty body"}), 400
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as tmp:
-        tmp.write(body)
-        tmp_path = tmp.name
-    try:
-        with sqlite3.connect(tmp_path) as conn:
-            leads = conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
-            payments = conn.execute("SELECT COUNT(*) FROM payments").fetchone()[0]
-    except Exception as e:
-        os.unlink(tmp_path)
-        return jsonify({"error": f"not a valid bot.db: {e}"}), 400
-    from config import DB_PATH
-    from db import engine
-    engine.dispose()
-    shutil.move(tmp_path, str(DB_PATH))
-    return jsonify({"ok": True, "leads": leads, "payments": payments, "path": str(DB_PATH)})
 
 
 def _try_sheets_sync(lead_id: int) -> None:
