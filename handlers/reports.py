@@ -350,18 +350,20 @@ async def cmd_clients(message: Message) -> None:
     await message.answer("\n".join(lines))
 
 
+DASHBOARD_FALLBACK = "https://bot-1777308240-2116-vladislav-sharlovski.bothost.tech"
+
+
+def _resolve_dashboard_url() -> str:
+    url = (os.environ.get("DASHBOARD_URL") or "").strip()
+    if not url or any(p in url for p in ("192.168.", "10.0.", "127.0.0.1", "localhost")):
+        return DASHBOARD_FALLBACK
+    return url
+
+
 @router.message(Command("dashboard"))
 @router.message(F.text == BTN_DASHBOARD)
 async def cmd_dashboard(message: Message) -> None:
-    url = (os.environ.get("DASHBOARD_URL") or "").strip()
-    if not url:
-        await message.answer("Адрес дашборда не задан в .env (DASHBOARD_URL).")
-        return
-    await message.answer(
-        f"🌐 <b>Дашборд:</b> {url}\n\n"
-        f"Открывается, когда устройство в той же Wi-Fi сети, что и Mac. "
-        f"С мобильного интернета сейчас не работает (нужен Tailscale)."
-    )
+    await message.answer(f"🌐 <b>Дашборд:</b> {_resolve_dashboard_url()}")
 
 
 @router.message(Command("sheet"))
