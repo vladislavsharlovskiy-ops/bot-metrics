@@ -1,8 +1,10 @@
 """
 Приёмник webhook'ов от Prodamus.
 
-Отдельный Flask-сервер на порту 8766. Только этот порт пробрасываем наружу
-через Cloudflare Tunnel — дашборд (8765) остаётся локальным.
+Регистрируется как Blueprint в общем Flask-приложении (см. main.py).
+В проде раздаётся через тот же домен, что и дашборд:
+  POST /webhook/prodamus  — приём платежей
+  GET  /health            — healthcheck
 
 Поток:
 1. Prodamus шлёт POST с form-данными платежа + signature.
@@ -25,7 +27,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request
+from flask import Blueprint, jsonify, request
 from sqlalchemy import or_, select
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -41,7 +43,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 OWNER_ID = int(os.environ["OWNER_ID"])
 TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-app = Flask(__name__)
+bp = Blueprint("webhook", __name__)
 
 
 # ───────── Telegram helper ─────────
@@ -87,7 +89,7 @@ def _match_lead(session, name: Optional[str], phone: Optional[str]) -> Optional[
 
 # ───────── route ─────────
 
-@app.post("/webhook/prodamus")
+@bp.post("/webhook/prodamus")
 def prodamus_webhook():
     form = request.form.to_dict(flat=True)
     log.info("Webhook received: order_id=%s", form.get("order_id"))
@@ -222,15 +224,6 @@ def _parse_datetime(raw: str) -> datetime:
 
 # ───────── healthcheck ─────────
 
-@app.get("/")
-def index():
-    return "Prodamus webhook receiver. POST /webhook/prodamus"
-
-
-@app.get("/health")
+@bp.get("/health")
 def health():
     return jsonify({"ok": True})
-
-
-if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=8766, debug=False)

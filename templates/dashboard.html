@@ -17,6 +17,7 @@
   .stage-consulted      { background: #a8dab5; color: #0b6b32; }
   .stage-package_bought { background: #34a853; color: #ffffff; }
   .stage-lost           { background: #fad2cf; color: #b3261e; }
+  .stage-ignoring       { background: #fff3e0; color: #ad6800; }
   .source-instagram { background: #fce4ec; color: #c2185b; }
   .source-youtube   { background: #ffebee; color: #d32f2f; }
   .source-telegram  { background: #e3f2fd; color: #1565c0; }
@@ -140,10 +141,11 @@
   <section class="bg-white rounded-xl border border-slate-200 shadow-sm">
     <div class="p-3 sm:p-5 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
       <div class="flex gap-1 text-sm overflow-x-auto -mx-3 px-3 sm:mx-0 sm:px-0">
-        <button @click="setStatus('active')" :class="leadFilter==='active' ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">Активные</button>
-        <button @click="setStatus('won')"    :class="leadFilter==='won'    ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">Купили пакет</button>
-        <button @click="setStatus('lost')"   :class="leadFilter==='lost'   ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">Отвалы</button>
-        <button @click="setStatus('all')"    :class="leadFilter==='all'    ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">Все</button>
+        <button @click="setStatus('active')"   :class="leadFilter==='active'   ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">Активные</button>
+        <button @click="setStatus('ignoring')" :class="leadFilter==='ignoring' ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">🤐 Игнорят</button>
+        <button @click="setStatus('won')"      :class="leadFilter==='won'      ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">Купили пакет</button>
+        <button @click="setStatus('lost')"     :class="leadFilter==='lost'     ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">Отвалы</button>
+        <button @click="setStatus('all')"      :class="leadFilter==='all'      ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">Все</button>
       </div>
       <input type="search" x-model.debounce.300ms="searchQuery" @input="loadLeads()" placeholder="Поиск…" class="w-full sm:flex-1 sm:min-w-[260px] px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"/>
     </div>
@@ -223,9 +225,15 @@
         </dl>
 
         <div class="space-y-2 pt-4 border-t border-slate-100">
-          <button x-show="selectedLead.next_stage" @click="advance()" class="w-full px-4 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium flex items-center justify-center gap-2">
+          <button x-show="selectedLead.next_stage && !selectedLead.is_ignoring" @click="advance()" class="w-full px-4 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium flex items-center justify-center gap-2">
             <span>→</span>
             <span x-text="selectedLead.next_stage_title"></span>
+          </button>
+          <button x-show="selectedLead.is_ignoring" @click="unignore()" class="w-full px-4 py-3 bg-amber-500 hover:bg-amber-600 text-white rounded-lg font-medium">
+            ▶️ Снять «игнорит»
+          </button>
+          <button x-show="selectedLead.is_active" @click="ignore()" class="w-full px-4 py-3 bg-white border border-amber-200 text-amber-700 hover:bg-amber-50 rounded-lg font-medium">
+            🤐 В «игнорит»
           </button>
           <button x-show="selectedLead.is_active" @click="markLost()" class="w-full px-4 py-3 bg-white border border-red-200 text-red-700 hover:bg-red-50 rounded-lg font-medium">
             ❌ Лид отвалился
@@ -468,6 +476,20 @@ function dash() {
 
     async revive() {
       const r = await fetch('/api/leads/' + this.selectedLead.id + '/revive', { method: 'POST' });
+      const d = await r.json();
+      if (d.lead) { this.selectedLead = d.lead; }
+      await this.refreshAll();
+    },
+
+    async ignore() {
+      const r = await fetch('/api/leads/' + this.selectedLead.id + '/ignore', { method: 'POST' });
+      const d = await r.json();
+      if (d.lead) { this.selectedLead = d.lead; }
+      await this.refreshAll();
+    },
+
+    async unignore() {
+      const r = await fetch('/api/leads/' + this.selectedLead.id + '/unignore', { method: 'POST' });
       const d = await r.json();
       if (d.lead) { this.selectedLead = d.lead; }
       await this.refreshAll();

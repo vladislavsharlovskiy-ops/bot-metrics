@@ -14,6 +14,9 @@ from stages import (
     BY_CODE,
     CONSULTED,
     FUNNEL,
+    IGNORING,
+    IGNORING_CODES,
+    IGNORING_STAGE,
     LEAD_NEW,
     LOST,
     LOST_STAGE,
@@ -54,6 +57,7 @@ def _lead_dict(lead: Lead) -> dict:
         "updated_at": lead.updated_at.isoformat(timespec="minutes"),
         "is_active": lead.stage in ACTIVE_CODES,
         "is_lost": lead.stage == LOST,
+        "is_ignoring": lead.stage == IGNORING,
     }
 
 
@@ -261,6 +265,8 @@ def api_leads():
             stmt = stmt.where(Lead.stage == LOST)
         elif status == "won":
             stmt = stmt.where(Lead.stage == PACKAGE_BOUGHT)
+        elif status == "ignoring":
+            stmt = stmt.where(Lead.stage.in_(IGNORING_CODES))
         # status == 'all' — no filter
         if q:
             pat = f"%{q}%"
@@ -275,6 +281,7 @@ def api_stages():
     return jsonify({
         "funnel": [{"code": s.code, "title": s.title, "short": s.short} for s in FUNNEL],
         "lost": {"code": LOST_STAGE.code, "title": LOST_STAGE.title, "short": LOST_STAGE.short},
+        "ignoring": {"code": IGNORING_STAGE.code, "title": IGNORING_STAGE.title, "short": IGNORING_STAGE.short},
         "sources": [{"code": c, "title": t} for c, t in SOURCES],
     })
 
@@ -349,6 +356,48 @@ def api_revive(lead_id: int):
         lead.stage = "qualified"
         lead.lost_reason = None
         session.add(StageHistory(lead_id=lead.id, stage="qualified"))
+        session.commit()
+        session.refresh(lead)
+    _try_sheets_sync(lead_id)
+    return jsonify({"lead": _lead_dict(lead)})
+
+
+@app.post("/api/leads/<int:lead_id>/ignore")
+def api_ignore(lead_id: int):
+    """Mark an active lead as ignoring."""
+    with get_session() as session:
+        lead = session.get(Lead, lead_id)
+        if not lead:
+            return jsonify({"error": "not found"}), 404
+        if lead.stage == IGNORING:
+            return jsonify({"lead": _lead_dict(lead)})
+        lead.stage = IGNORING
+        session.add(StageHistory(lead_id=lead.id, stage=IGNORING))
+        session.commit()
+        session.refresh(lead)
+    _try_sheets_sync(lead_id)
+    return jsonify({"lead": _lead_dict(lead)})
+
+
+@app.post("/api/leads/<int:lead_id>/unignore")
+def api_unignore(lead_id: int):
+    """Return ignoring lead to its previous stage (or lead_new)."""
+    with get_session() as session:
+        lead = session.get(Lead, lead_id)
+        if not lead:
+            return jsonify({"error": "not found"}), 404
+        if lead.stage != IGNORING:
+            return jsonify({"lead": _lead_dict(lead)})
+        prev = session.execute(
+            select(StageHistory)
+            .where(StageHistory.lead_id == lead_id)
+            .where(StageHistory.stage != IGNORING)
+            .order_by(StageHistory.changed_at.desc())
+            .limit(1)
+        ).scalars().first()
+        target = prev.stage if prev else LEAD_NEW
+        lead.stage = target
+        session.add(StageHistory(lead_id=lead.id, stage=target))
         session.commit()
         session.refresh(lead)
     _try_sheets_sync(lead_id)
