@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import logging
 from datetime import datetime, time, timedelta
 from pathlib import Path
@@ -7,6 +8,7 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template, request
 from sqlalchemy import func, or_, select
 
+from config import LEADS_API_KEY
 from db import get_session
 from models import Client, Lead, Payment, StageHistory
 from stages import (
@@ -525,12 +527,11 @@ def api_unignore(lead_id: int):
     return jsonify({"lead": _lead_dict(lead)})
 
 
-@app.post("/api/leads")
-def api_create():
-    body = request.get_json(silent=True) or {}
+def _create_lead_from_payload(body: dict):
+    """Создаёт Lead + начальную запись в StageHistory. Возвращает (lead_dict, error)."""
     source = (body.get("source") or "").strip()
     if source not in SOURCE_TITLES:
-        return jsonify({"error": "bad source"}), 400
+        return None, ("bad source", 400)
     name = (body.get("name") or "").strip() or None
     username = (body.get("username") or "").strip() or None
     req = (body.get("request") or "").strip() or None
@@ -548,8 +549,42 @@ def api_create():
         session.add(StageHistory(lead_id=lead.id, stage=LEAD_NEW))
         session.commit()
         session.refresh(lead)
-    _try_sheets_sync(lead.id)
-    return jsonify({"lead": _lead_dict(lead)})
+        result = _lead_dict(lead)
+        lead_id = lead.id
+    _try_sheets_sync(lead_id)
+    return result, None
+
+
+@app.post("/api/leads")
+def api_create():
+    body = request.get_json(silent=True) or {}
+    lead, err = _create_lead_from_payload(body)
+    if err:
+        return jsonify({"error": err[0]}), err[1]
+    return jsonify({"lead": lead})
+
+
+@app.post("/api/external/leads")
+def api_external_create():
+    """
+    Защищённый эндпоинт для внешних ботов (например, отдельный лид-бот).
+    Принимает то же тело, что и /api/leads, но требует заголовок X-API-Key.
+    Если LEADS_API_KEY не задан в env — эндпоинт отключён (403).
+    """
+    if not LEADS_API_KEY:
+        return jsonify({"error": "external api disabled"}), 403
+    provided = request.headers.get("X-API-Key", "").strip()
+    if not provided or not hmac.compare_digest(LEADS_API_KEY, provided):
+        return jsonify({"error": "unauthorized"}), 401
+
+    body = request.get_json(silent=True) or {}
+    # Дефолтный source для лид-бота — telegram, если не передали ничего валидного
+    if not body.get("source") or body.get("source") not in SOURCE_TITLES:
+        body["source"] = "telegram"
+    lead, err = _create_lead_from_payload(body)
+    if err:
+        return jsonify({"error": err[0]}), err[1]
+    return jsonify({"ok": True, "lead": lead})
 
 
 def _try_sheets_sync(lead_id: int) -> None:

@@ -47,3 +47,8 @@ ALLOWED_USERS = {OWNER_ID} | EXTRA_USER_IDS
 
 # Если "1" — пускаем кого угодно. Удобно для тестов.
 OPEN_ACCESS = os.environ.get("BOT_OPEN_ACCESS", "").strip() == "1"
+
+# Ключ для внешнего API создания лидов (POST /api/external/leads).
+# Используется отдельным лид-ботом, который пишет лиды по HTTP в общую базу.
+# Если переменная не задана — эндпоинт отключён (возвращает 403).
+LEADS_API_KEY = os.environ.get("LEADS_API_KEY", "").strip()
