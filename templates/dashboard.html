@@ -319,8 +319,11 @@ function dash() {
     },
 
     get periodLabel() {
-      if (this.period === 'now') return 'Активные лиды по этапам прямо сейчас (снапшот, не движение)';
-      if (this.periodData) return 'События за период: ' + this.periodData.label;
+      if (this.period === 'now') {
+        const total = (this.funnel.stages || []).reduce((a, s) => a + (s.count || 0), 0);
+        return 'Где лежат активные лиды прямо сейчас · всего ' + total + '. Это распределение, не воронка движения — для конверсий смотри День/Неделю/Месяц.';
+      }
+      if (this.periodData) return 'События за период: ' + this.periodData.label + ' · % — конверсия от первого этапа';
       return '';
     },
 
@@ -417,9 +420,16 @@ function dash() {
       if (!ctx) return;
       const stages = this.funnel.stages;
       const data = stages.map(s => s.count);
+      const isSnapshot = this.period === 'now';
       const top = data[0] || 0;
-      // Подпись слева: "Квал 50%" — конверсия от начала воронки
+      const totalActive = data.reduce((a, b) => a + b, 0);
+      // На снапшоте показываем долю от всех активных, на периодах — конверсию от верха воронки
       const labels = stages.map((s, i) => {
+        if (isSnapshot) {
+          if (totalActive === 0) return s.short;
+          const pct = Math.round(data[i] / totalActive * 100);
+          return s.short + ' · ' + pct + '%';
+        }
         if (i === 0 || top === 0) return s.short;
         const pct = Math.round(data[i] / top * 100);
         return s.short + ' · ' + pct + '%';
@@ -442,11 +452,17 @@ function dash() {
                   const i = item.dataIndex;
                   const count = data[i];
                   const lines = [count + ' шт.'];
-                  if (top > 0) {
-                    lines.push('От верха: ' + Math.round(count / top * 100) + '%');
-                  }
-                  if (i > 0 && data[i - 1] > 0) {
-                    lines.push('От прошлого этапа: ' + Math.round(count / data[i - 1] * 100) + '%');
+                  if (isSnapshot) {
+                    if (totalActive > 0) {
+                      lines.push('Доля активных: ' + Math.round(count / totalActive * 100) + '%');
+                    }
+                  } else {
+                    if (top > 0) {
+                      lines.push('От верха: ' + Math.round(count / top * 100) + '%');
+                    }
+                    if (i > 0 && data[i - 1] > 0) {
+                      lines.push('От прошлого этапа: ' + Math.round(count / data[i - 1] * 100) + '%');
+                    }
                   }
                   return lines;
                 }
