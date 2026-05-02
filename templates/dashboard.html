@@ -70,7 +70,7 @@
           <button @click="setPeriod('today')" :class="period==='today' ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">День</button>
           <button @click="setPeriod('week')"  :class="period==='week'  ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">Неделя</button>
           <button @click="setPeriod('month')" :class="period==='month' ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">Месяц</button>
-          <button @click="setPeriod('now')"   :class="period==='now'   ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">Сейчас</button>
+          <button @click="setPeriod('now')"   :class="period==='now'   ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">В работе</button>
         </div>
       </div>
       <div class="text-xs text-slate-500 mb-3" x-text="periodLabel"></div>
@@ -319,7 +319,7 @@ function dash() {
     },
 
     get periodLabel() {
-      if (this.period === 'now') return 'Сколько лидов СЕЙЧАС на каждом этапе';
+      if (this.period === 'now') return 'Активные лиды по этапам прямо сейчас (снапшот, не движение)';
       if (this.periodData) return 'События за период: ' + this.periodData.label;
       return '';
     },
@@ -415,8 +415,15 @@ function dash() {
     renderFunnelChart() {
       const ctx = document.getElementById('funnelChart');
       if (!ctx) return;
-      const labels = this.funnel.stages.map(s => s.short);
-      const data = this.funnel.stages.map(s => s.count);
+      const stages = this.funnel.stages;
+      const data = stages.map(s => s.count);
+      const top = data[0] || 0;
+      // Подпись слева: "Квал 50%" — конверсия от начала воронки
+      const labels = stages.map((s, i) => {
+        if (i === 0 || top === 0) return s.short;
+        const pct = Math.round(data[i] / top * 100);
+        return s.short + ' · ' + pct + '%';
+      });
       const colors = ['#93c5fd', '#60a5fa', '#fcd34d', '#fbbf24', '#86efac', '#4ade80', '#16a34a'];
       if (this.funnelChart) this.funnelChart.destroy();
       this.funnelChart = new Chart(ctx, {
@@ -427,7 +434,25 @@ function dash() {
           responsive: true,
           maintainAspectRatio: false,
           animation: false,
-          plugins: { legend: { display: false } },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                label: (item) => {
+                  const i = item.dataIndex;
+                  const count = data[i];
+                  const lines = [count + ' шт.'];
+                  if (top > 0) {
+                    lines.push('От верха: ' + Math.round(count / top * 100) + '%');
+                  }
+                  if (i > 0 && data[i - 1] > 0) {
+                    lines.push('От прошлого этапа: ' + Math.round(count / data[i - 1] * 100) + '%');
+                  }
+                  return lines;
+                }
+              }
+            }
+          },
           scales: { x: { ticks: { precision: 0 } } },
         }
       });
