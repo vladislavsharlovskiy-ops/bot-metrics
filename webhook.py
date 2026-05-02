@@ -74,17 +74,49 @@ def _match_client(session, phone: Optional[str], email: Optional[str]) -> Option
     return session.execute(select(Client).where(or_(*conds))).scalars().first()
 
 
-def _match_lead(session, name: Optional[str], phone: Optional[str]) -> Optional[Lead]:
-    if not name and not phone:
+def _phone_digits(phone: Optional[str]) -> Optional[str]:
+    """Только цифры из телефона; берём последние 10 — это надёжное ядро номера в РФ."""
+    if not phone:
         return None
+    digits = "".join(c for c in phone if c.isdigit())
+    return digits[-10:] if len(digits) >= 10 else (digits or None)
+
+
+def _match_leads(
+    session,
+    name: Optional[str],
+    phone: Optional[str],
+    email: Optional[str],
+    limit: int = 5,
+) -> list[Lead]:
+    """
+    Ищет кандидатов-лидов по имени (по словам), телефону и email.
+    Возвращает до `limit` лидов, отсортированных по свежести.
+    """
     conds = []
     if name:
-        conds.append(Lead.name.ilike(f"%{name}%"))
+        # Бьём имя на слова, ищем каждое слово >=3 букв в Lead.name и Lead.username.
+        # Это ловит «Зарема» → «Зарема Цеева», и наоборот.
+        for word in name.split():
+            if len(word) >= 3:
+                conds.append(Lead.name.ilike(f"%{word}%"))
+                conds.append(Lead.username.ilike(f"%{word}%"))
     if phone:
         conds.append(Lead.username.ilike(f"%{phone}%"))
-    return session.execute(
-        select(Lead).where(or_(*conds)).order_by(Lead.updated_at.desc())
-    ).scalars().first()
+        digits = _phone_digits(phone)
+        if digits and len(digits) >= 7:
+            # Ищем по последним 7+ цифрам — поймает форматы +7..., 8..., с пробелами и т.п.
+            conds.append(Lead.username.ilike(f"%{digits[-7:]}%"))
+    if email:
+        conds.append(Lead.username.ilike(f"%{email}%"))
+    if not conds:
+        return []
+    rows = session.execute(
+        select(Lead).where(or_(*conds))
+        .order_by(Lead.updated_at.desc())
+        .limit(limit)
+    ).scalars().all()
+    return list(rows)
 
 
 # ───────── route ─────────
@@ -124,7 +156,14 @@ def prodamus_webhook():
 
         # ищем клиента
         client = _match_client(session, p["customer_phone"], p["customer_email"])
-        lead = None if client else _match_lead(session, p["customer_name"], p["customer_phone"])
+        lead_candidates = []
+        if not client:
+            lead_candidates = _match_leads(
+                session,
+                p["customer_name"],
+                p["customer_phone"],
+                p["customer_email"],
+            )
 
         payment = Payment(
             prodamus_id=p["prodamus_id"],
@@ -148,14 +187,14 @@ def prodamus_webhook():
             session.refresh(payment)
             _notify_auto_repeat(payment, client)
         else:
-            # Не нашли клиента — спрашиваем у владельца
+            # Не нашли клиента — спрашиваем у владельца, какой лид (или новый клиент)
             payment.payment_type = "unclassified"
-            if lead:
-                payment.lead_id = lead.id
+            if lead_candidates:
+                payment.lead_id = lead_candidates[0].id
             session.add(payment)
             session.commit()
             session.refresh(payment)
-            _notify_classify(payment, lead)
+            _notify_classify(payment, lead_candidates)
 
     return jsonify({"ok": True})
 
@@ -195,14 +234,31 @@ def _notify_auto_repeat(payment: Payment, client: Client) -> None:
     tg_send(text, kb)
 
 
-def _notify_classify(payment: Payment, lead: Optional[Lead]) -> None:
-    text = _payment_header(payment) + "\n\n❓ <b>Не нашли клиента в базе.</b>"
+def _lead_button_label(lead: Lead) -> str:
+    """Подпись кнопки для лида: имя + источник, обрезаем до ~40 символов."""
+    name = lead.name or lead.username or f"#{lead.id}"
+    src = lead.source or ""
+    label = f"🎯 #{lead.id} · {name}"
+    if src:
+        label += f" · {src}"
+    return label[:48]
+
+
+def _notify_classify(payment: Payment, lead_candidates: list[Lead]) -> None:
+    text = _payment_header(payment)
     rows = []
-    if lead:
-        text += f"\nПохоже на лид <b>#{lead.id}</b> «{lead.name or lead.username}»."
-        rows.append([{"text": f"✅ Первичка от лида #{lead.id}",
-                       "callback_data": f"pay:first_lead:{payment.id}:{lead.id}"}])
-    rows.append([{"text": "✅ Первичка (новый клиент)",
+    if lead_candidates:
+        text += "\n\n🔍 <b>Возможные совпадения с лидами:</b>"
+        for lead in lead_candidates:
+            text += f"\n• #{lead.id} «{lead.name or lead.username}» — {lead.source}"
+            rows.append([{
+                "text": _lead_button_label(lead),
+                "callback_data": f"pay:first_lead:{payment.id}:{lead.id}",
+            }])
+        text += "\n\nЕсли это новый клиент — нажми «Новый клиент»."
+    else:
+        text += "\n\n❓ <b>Не нашли клиента в базе.</b>"
+    rows.append([{"text": "➕ Новый клиент (первичка)",
                    "callback_data": f"pay:first_new:{payment.id}"}])
     rows.append([{"text": "🔁 Повторка (новый клиент)",
                    "callback_data": f"pay:repeat_new:{payment.id}"}])

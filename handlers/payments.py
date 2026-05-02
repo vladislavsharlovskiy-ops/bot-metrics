@@ -20,13 +20,54 @@ from datetime import datetime
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from config import OWNER_ID
 from db import get_session
 from models import Client, Lead, Payment, RepeatSession, StageHistory
 from sheets import sync_lead
 from stages import LEAD_NEW, PAID, REPEAT_PAID, SOURCES
+
+
+def _phone_digits(phone):
+    if not phone:
+        return None
+    digits = "".join(c for c in phone if c.isdigit())
+    return digits[-10:] if len(digits) >= 10 else (digits or None)
+
+
+def _match_lead_candidates(session, name, phone, email, limit=5):
+    """Дублирует логику webhook._match_leads: ищет лидов по словам имени + телефону + email."""
+    conds = []
+    if name:
+        for word in name.split():
+            if len(word) >= 3:
+                conds.append(Lead.name.ilike(f"%{word}%"))
+                conds.append(Lead.username.ilike(f"%{word}%"))
+    if phone:
+        conds.append(Lead.username.ilike(f"%{phone}%"))
+        digits = _phone_digits(phone)
+        if digits and len(digits) >= 7:
+            conds.append(Lead.username.ilike(f"%{digits[-7:]}%"))
+    if email:
+        conds.append(Lead.username.ilike(f"%{email}%"))
+    if not conds:
+        return []
+    rows = session.execute(
+        select(Lead).where(or_(*conds))
+        .order_by(Lead.updated_at.desc())
+        .limit(limit)
+    ).scalars().all()
+    return list(rows)
+
+
+def _lead_button_label(lead: Lead) -> str:
+    name = lead.name or lead.username or f"#{lead.id}"
+    src = lead.source or ""
+    label = f"🎯 #{lead.id} · {name}"
+    if src:
+        label += f" · {src}"
+    return label[:48]
 
 router = Router()
 
@@ -86,16 +127,36 @@ async def cb_first_from_lead(call: CallbackQuery) -> None:
             await call.answer("Платёж или лид не найден", show_alert=True)
             return
 
-        # Создаём клиента на основе лида + платежа
-        client = _create_client_from_payment(session, payment, lead=lead)
+        # 1) клиент: переиспользуем существующего, иначе ищем по лиду, иначе создаём
+        client = None
+        if payment.client_id:
+            client = session.get(Client, payment.client_id)
+        if client is None:
+            client = session.execute(
+                select(Client).where(Client.lead_id == lead.id)
+            ).scalars().first()
+        if client is None:
+            client = _create_client_from_payment(session, payment, lead=lead)
+
+        # привяжем клиента к этому лиду
+        if not client.lead_id:
+            client.lead_id = lead.id
+        if not client.first_payment_at:
+            client.first_payment_at = payment.paid_at
+        client.last_payment_at = payment.paid_at
+
         payment.client_id = client.id
         payment.lead_id = lead.id
         payment.payment_type = "first"
 
-        # Двигаем лид в "Оплата"
+        # 2) этап: двигаем в PAID, если ещё не там, и пишем историю на момент платежа
         if lead.stage != PAID:
             lead.stage = PAID
-            session.add(StageHistory(lead_id=lead.id, stage=PAID))
+            session.add(StageHistory(
+                lead_id=lead.id,
+                stage=PAID,
+                changed_at=payment.paid_at or datetime.now(),
+            ))
 
         session.commit()
         sync_lead(lead.id)
@@ -103,8 +164,7 @@ async def cb_first_from_lead(call: CallbackQuery) -> None:
 
     await call.message.edit_text(
         f"✅ Платёж записан как <b>первичка</b> от лида #{lead_id}.\n"
-        f"Лид «{client_name}» переведён в этап «Оплата консультации»,\n"
-        f"в базе клиентов создана запись.",
+        f"Лид «{client_name}» переведён в этап «Оплата консультации».",
         parse_mode="HTML",
     )
     await call.answer("Записано")
@@ -211,13 +271,14 @@ async def cb_first_new_with_source(call: CallbackQuery) -> None:
 
 @router.message(Command("fixpay"))
 async def cmd_fixpay(message: Message, bot: Bot) -> None:
-    """Найти последний платёж-первичку без лида и предложить дозаписать с источником."""
+    """Найти последний платёж-сироту, найти кандидатов-лидов, предложить привязку."""
     if message.from_user and message.from_user.id != OWNER_ID:
         return
     with get_session() as session:
+        # Сирота = первичка без лида или unclassified без лида
         payment = session.execute(
             select(Payment)
-            .where(Payment.payment_type == "first")
+            .where(Payment.payment_type.in_(["first", "unclassified"]))
             .where(Payment.lead_id.is_(None))
             .order_by(Payment.paid_at.desc())
         ).scalars().first()
@@ -230,15 +291,52 @@ async def cmd_fixpay(message: Message, bot: Bot) -> None:
         product = payment.product or "—"
         paid_at = payment.paid_at.strftime("%d.%m.%Y %H:%M") if payment.paid_at else "—"
 
-    text = (
-        f"🛠 <b>Платёж-сирота</b>\n\n"
-        f"💰 {amount}\n"
-        f"👤 {who}\n"
-        f"🛍 {product}\n"
-        f"🕒 {paid_at}\n\n"
-        f"👉 <b>Откуда пришёл клиент?</b>"
+        candidates = _match_lead_candidates(
+            session,
+            payment.customer_name,
+            payment.customer_phone,
+            payment.customer_email,
+        )
+
+    text_lines = [
+        "🛠 <b>Платёж-сирота</b>",
+        "",
+        f"💰 {amount}",
+        f"👤 {who}",
+        f"🛍 {product}",
+        f"🕒 {paid_at}",
+    ]
+
+    rows: list[list[InlineKeyboardButton]] = []
+    if candidates:
+        text_lines.append("")
+        text_lines.append("🔍 <b>Возможные совпадения с лидами:</b>")
+        for lead in candidates:
+            text_lines.append(f"• #{lead.id} «{lead.name or lead.username}» — {lead.source}")
+            rows.append([InlineKeyboardButton(
+                text=_lead_button_label(lead),
+                callback_data=f"pay:first_lead:{pid}:{lead.id}",
+            )])
+        text_lines.append("")
+        text_lines.append("Если это новый клиент — нажми «Новый клиент».")
+    else:
+        text_lines.append("")
+        text_lines.append("❓ Совпадений с лидами не найдено.")
+
+    rows.append([InlineKeyboardButton(
+        text="➕ Новый клиент (выбрать источник)",
+        callback_data=f"pay:first_new:{pid}",
+    )])
+    rows.append([InlineKeyboardButton(
+        text="🚫 Игнорировать платёж",
+        callback_data=f"pay:ignore:{pid}",
+    )])
+
+    await message.answer(
+        "\n".join(text_lines),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
-    await message.answer(text, parse_mode="HTML", reply_markup=_source_keyboard(pid))
 
 
 # ───────── repeat new ─────────
