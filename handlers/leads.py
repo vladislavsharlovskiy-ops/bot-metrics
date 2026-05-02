@@ -276,7 +276,7 @@ async def cmd_clients(message: Message) -> None:
                 client_ids_by_lead[lid].append(cid)
 
         revenue_by_lead: dict[int, float] = {lid: 0.0 for lid in lead_ids}
-        # Платежи привязанные к лиду напрямую
+        # 1) Платежи, привязанные к лиду напрямую (Payment.lead_id IS NOT NULL)
         direct = session.execute(
             select(Payment.lead_id, func.coalesce(func.sum(Payment.amount), 0))
             .where(Payment.lead_id.in_(lead_ids))
@@ -285,12 +285,14 @@ async def cmd_clients(message: Message) -> None:
         ).all()
         for lid, total in direct:
             revenue_by_lead[lid] = revenue_by_lead.get(lid, 0) + float(total or 0)
-        # Платежи через клиента
+        # 2) Платежи через клиента — но ТОЛЬКО без прямой привязки к лиду,
+        # иначе платёж посчитается дважды (через lead_id и через client→lead_id).
         all_client_ids = [c for cids in client_ids_by_lead.values() for c in cids]
         if all_client_ids:
             via_client = session.execute(
                 select(Payment.client_id, func.coalesce(func.sum(Payment.amount), 0))
                 .where(Payment.client_id.in_(all_client_ids))
+                .where(Payment.lead_id.is_(None))  # ← ключевая защита от дубля
                 .where(Payment.payment_type.in_(["first", "repeat"]))
                 .group_by(Payment.client_id)
             ).all()
