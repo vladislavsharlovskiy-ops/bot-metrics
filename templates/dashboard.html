@@ -97,10 +97,8 @@
       <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-3 sm:mb-4">
         <h2 class="text-base sm:text-lg font-semibold">Воронка</h2>
         <div class="flex gap-1 text-xs overflow-x-auto -mx-1 px-1">
-          <button @click="setPeriod('today')" :class="period==='today' ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">День</button>
           <button @click="setPeriod('week')"  :class="period==='week'  ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">Неделя</button>
           <button @click="setPeriod('month')" :class="period==='month' ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">Месяц</button>
-          <button @click="setPeriod('now')"   :class="period==='now'   ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">В работе</button>
         </div>
       </div>
       <div class="text-xs text-slate-500 mb-3" x-text="periodLabel"></div>
@@ -194,6 +192,22 @@
       <input type="search" x-model.debounce.300ms="searchQuery" @input="loadLeads()" placeholder="Поиск…" class="w-full sm:flex-1 sm:min-w-[260px] px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"/>
     </div>
 
+    <!-- Сводка для вкладки «Клиенты» -->
+    <div x-show="leadFilter === 'clients' && clientsSummary" class="px-3 sm:px-5 py-3 bg-emerald-50 border-b border-emerald-100 grid grid-cols-3 gap-3 text-sm">
+      <div>
+        <div class="text-[10px] uppercase tracking-wider text-emerald-700 font-medium">Клиентов</div>
+        <div class="font-bold text-emerald-900" x-text="clientsSummary?.count || 0"></div>
+      </div>
+      <div>
+        <div class="text-[10px] uppercase tracking-wider text-emerald-700 font-medium">Выручка</div>
+        <div class="font-bold text-emerald-900" x-text="formatMoney(clientsSummary?.revenue || 0)"></div>
+      </div>
+      <div>
+        <div class="text-[10px] uppercase tracking-wider text-emerald-700 font-medium">Средний цикл</div>
+        <div class="font-bold text-emerald-900" x-text="clientsSummary?.avg_cycle_days !== null ? clientsSummary.avg_cycle_days + ' дн.' : '—'"></div>
+      </div>
+    </div>
+
     <div class="divide-y divide-slate-100 max-h-[60vh] sm:max-h-[600px] overflow-y-auto scroll-fade">
       <template x-if="leads.length === 0">
         <div class="p-8 text-center text-slate-400 text-sm">Лидов пока нет.</div>
@@ -209,6 +223,11 @@
             </div>
             <div x-show="lead.username" class="text-slate-400 text-xs mt-0.5" x-text="lead.username"></div>
             <div x-show="lead.request" class="text-xs sm:text-sm text-slate-600 mt-1 line-clamp-2" x-text="lead.request"></div>
+            <!-- Выручка и цикл сделки — только в вкладке Клиенты -->
+            <div x-show="leadFilter === 'clients' && lead.revenue !== undefined" class="flex gap-3 mt-1.5 text-xs">
+              <span class="text-emerald-700 font-semibold">💰 <span x-text="formatMoney(lead.revenue)"></span></span>
+              <span x-show="lead.cycle_days !== null && lead.cycle_days !== undefined" class="text-slate-500">⏱ цикл: <span x-text="lead.cycle_days"></span> дн.</span>
+            </div>
             <div x-show="lead.notes" class="text-xs text-slate-400 mt-1 truncate">📝 <span x-text="lead.notes"></span></div>
           </div>
           <div class="text-[10px] sm:text-xs text-slate-400 whitespace-nowrap shrink-0" x-text="formatDate(lead.updated_at)"></div>
@@ -342,10 +361,11 @@ function dash() {
     funnel: { stages: [], lost: 0 },
     channels: [],
     months: [],
-    period: 'now',
+    period: 'month',
     periodData: null,
     leads: [],
     leadFilter: 'active',
+    clientsSummary: null,
     searchQuery: '',
     selectedLead: null,
     noteDraft: '',
@@ -360,10 +380,6 @@ function dash() {
     },
 
     get periodLabel() {
-      if (this.period === 'now') {
-        const total = (this.funnel.stages || []).reduce((a, s) => a + (s.count || 0), 0);
-        return 'Где лежат активные лиды прямо сейчас · всего ' + total + '. Это распределение, не воронка движения — для конверсий смотри День/Неделю/Месяц.';
-      }
       if (this.periodData) return 'События за период: ' + this.periodData.label + ' · % — конверсия от первого этапа';
       return '';
     },
@@ -378,27 +394,27 @@ function dash() {
 
     get summaryCards() {
       if (!this.summary) return [];
-      const weekLeads = this.summary.week.lead_new || 0;
+      const monthLeads = this.summary.month.lead_new || 0;
       const monthPayments = this.summary.month_payments || 0;
+      const monthClients = this.summary.month_clients || 0;
       const monthRevenue = this.summary.month_revenue || 0;
       const avgCheck = this.summary.month_avg_check || 0;
-      // Конверсия за месяц: оплатили / пришло заявок
-      const monthLeads = this.summary.month.lead_new || 0;
+      // Конверсия за месяц: уникальных оплативших лидов / пришедших заявок
       const monthPaid = (this.summary.month.paid || 0)
                      + (this.summary.month.consulted || 0)
                      + (this.summary.month.package_bought || 0);
       const conv = monthLeads ? Math.round(monthPaid / monthLeads * 100) : null;
       return [
-        { label: 'Заявок за неделю', value: weekLeads,
-          hint: 'с понедельника', color: 'text-blue-600' },
+        { label: 'Заявок за месяц', value: monthLeads,
+          hint: this.summary.month_label || '', color: 'text-blue-600' },
         { label: 'Оплат за месяц', value: monthPayments,
-          hint: monthPayments ? 'клиентов: ' + this.summary.total_clients : 'пока нет', color: 'text-emerald-600' },
-        { label: 'Выручка за месяц', value: this.formatMoney(monthRevenue),
-          hint: 'first + repeat', color: 'text-emerald-700' },
-        { label: 'Средний чек', value: this.formatMoney(avgCheck),
-          hint: monthPayments ? 'за ' + monthPayments + ' оплат' : '—', color: 'text-slate-900' },
+          hint: monthPayments ? 'клиентов: ' + monthClients : 'пока нет', color: 'text-emerald-600' },
         { label: 'Конверсия → оплата', value: conv === null ? '—' : (conv + '%'),
           hint: monthLeads ? monthPaid + ' из ' + monthLeads : 'нет заявок', color: 'text-violet-600' },
+        { label: 'Средний чек', value: this.formatMoney(avgCheck),
+          hint: monthPayments ? 'за ' + monthPayments + ' оплат' : '—', color: 'text-slate-900' },
+        { label: 'Выручка за месяц', value: this.formatMoney(monthRevenue),
+          hint: 'first + repeat', color: 'text-emerald-700' },
       ];
     },
 
@@ -441,20 +457,14 @@ function dash() {
       const r = await fetch(url);
       const d = await r.json();
       this.leads = d.leads;
+      this.clientsSummary = d.clients_summary || null;
     },
 
     async loadFunnelByPeriod() {
-      if (this.period === 'now') {
-        const r = await fetch('/api/funnel');
-        const d = await r.json();
-        this.funnel = d;
-        this.periodData = null;
-      } else {
-        const r = await fetch('/api/period/' + this.period);
-        const d = await r.json();
-        this.funnel = { stages: d.stages, lost: 0 };
-        this.periodData = d;
-      }
+      const r = await fetch('/api/period/' + this.period);
+      const d = await r.json();
+      this.funnel = { stages: d.stages, lost: 0 };
+      this.periodData = d;
     },
 
     setPeriod(p) {
@@ -468,36 +478,25 @@ function dash() {
     },
 
     get funnelView() {
-      // Каждая строка: имя | полоска | число·процент. Ширина полоски — пропорция
-      // относительно эталона (верха воронки или максимума активных).
+      // Воронка движения за период. Каждая строка: имя | полоска | число·%.
+      // Ширина полоски пропорциональна % от верха, ограничена 100%.
+      // В подписи показываем реальный процент (может быть и >100%).
       const colors = ['#60a5fa', '#3b82f6', '#fbbf24', '#f59e0b', '#34d399', '#10b981', '#059669'];
       const stages = this.funnel.stages || [];
       const data = stages.map(s => s.count || 0);
       const top = data[0] || 0;
-      const totalActive = data.reduce((a, b) => a + b, 0);
-      const maxData = Math.max(...data, 1);
-      const isSnapshot = this.period === 'now';
       return stages.map((s, i) => {
         const count = data[i];
-        let fillPct, label, tooltip;
-        if (isSnapshot) {
-          const pct = totalActive > 0 ? Math.round(count / totalActive * 100) : 0;
-          fillPct = Math.round(count / maxData * 100);
-          label = totalActive > 0 ? pct + '%' : '—';
-          tooltip = `${count} на этапе «${s.title}»` +
-                    (totalActive > 0 ? ` · ${pct}% от всех активных` : '');
+        const pct = top > 0 ? Math.round(count / top * 100) : 0;
+        const fillPct = top > 0 ? Math.min(100, pct) : 0;
+        const label = top > 0 ? pct + '%' : '—';
+        let tooltip;
+        if (i === 0) {
+          tooltip = `${count} заявок за период`;
         } else {
-          const pct = top > 0 ? Math.round(count / top * 100) : 0;
-          // Полоска ограничена 100%, но цифра в подписи показывает реальный %
-          fillPct = top > 0 ? Math.min(100, Math.round(count / top * 100)) : 0;
-          label = top > 0 ? pct + '%' : '—';
-          if (i === 0) {
-            tooltip = `${count} заявок за период`;
-          } else {
-            const prev = data[i - 1];
-            const prevPct = prev > 0 ? Math.round(count / prev * 100) : 0;
-            tooltip = `${count} · ${pct}% от верха · ${prevPct}% от прошлого этапа`;
-          }
+          const prev = data[i - 1];
+          const prevPct = prev > 0 ? Math.round(count / prev * 100) : 0;
+          tooltip = `${count} · ${pct}% от верха · ${prevPct}% от прошлого этапа`;
         }
         return {
           code: s.code,

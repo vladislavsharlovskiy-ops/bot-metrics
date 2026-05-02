@@ -8,7 +8,7 @@ from flask import Flask, jsonify, render_template, request
 from sqlalchemy import func, or_, select
 
 from db import get_session
-from models import Lead, Payment, StageHistory
+from models import Client, Lead, Payment, StageHistory
 from stages import (
     ACTIVE_CODES,
     BY_CODE,
@@ -112,7 +112,7 @@ def index():
 
 @app.get("/api/summary")
 def api_summary():
-    """Шапка дашборда: заявки за неделю + оплаты/выручка/средний чек за месяц."""
+    """Шапка дашборда: всё за текущий месяц + неделя/сегодня для совместимости."""
     today_s, today_e = _today_range()
     week_s, week_e = _week_range()
     month_s, month_e = _month_range()
@@ -142,14 +142,29 @@ def api_summary():
         month_payments = int(month_pay[1] or 0)
         month_avg = (month_revenue / month_payments) if month_payments else 0
 
+        # Уникальных клиентов, заплативших в этом месяце (а не общим итогом).
+        # Считаем distinct по client_id и lead_id (на случай платежей без client).
+        month_clients = session.execute(
+            select(func.count(func.distinct(
+                func.coalesce(Payment.client_id, -Payment.lead_id)
+            )))
+            .where(Payment.paid_at >= month_s)
+            .where(Payment.paid_at < month_e)
+            .where(Payment.payment_type.in_(["first", "repeat"]))
+        ).scalar_one() or 0
+
+    month_label = f"{RU_MONTHS[month_s.month - 1]} {month_s.year}"
+
     return jsonify({
         "today": today,
         "week": week,
         "month": month,
+        "month_label": month_label,
         "total_active": total_active,
         "total_clients": total_clients,
         "month_revenue": month_revenue,
         "month_payments": month_payments,
+        "month_clients": int(month_clients),
         "month_avg_check": month_avg,
     })
 
@@ -274,6 +289,66 @@ def api_period(scope: str):
     })
 
 
+def _client_metrics(session, lead_ids: list[int]) -> dict[int, dict]:
+    """
+    Возвращает {lead_id: {revenue, first_paid_at, cycle_days}}.
+    Цикл сделки = days между Lead.created_at и первой оплатой (first или repeat).
+    """
+    if not lead_ids:
+        return {}
+    out = {lid: {"revenue": 0.0, "first_paid_at": None, "cycle_days": None} for lid in lead_ids}
+
+    # Map lead_id → all client_ids привязанных к нему
+    client_ids_by_lead: dict[int, list[int]] = {lid: [] for lid in lead_ids}
+    for cid, lid in session.execute(
+        select(Client.id, Client.lead_id).where(Client.lead_id.in_(lead_ids))
+    ).all():
+        client_ids_by_lead.setdefault(lid, []).append(cid)
+
+    # Берём все релевантные платежи: либо привязанные к лиду напрямую, либо к клиенту лида.
+    # ВАЖНО: чтобы не считать дубли, через клиента берём только те, у кого lead_id IS NULL.
+    direct_rows = session.execute(
+        select(Payment.lead_id, Payment.amount, Payment.paid_at)
+        .where(Payment.lead_id.in_(lead_ids))
+        .where(Payment.payment_type.in_(["first", "repeat"]))
+    ).all()
+    for lid, amount, paid_at in direct_rows:
+        rec = out[lid]
+        rec["revenue"] += float(amount or 0)
+        if paid_at and (rec["first_paid_at"] is None or paid_at < rec["first_paid_at"]):
+            rec["first_paid_at"] = paid_at
+
+    all_client_ids = [c for cids in client_ids_by_lead.values() for c in cids]
+    if all_client_ids:
+        via_client = session.execute(
+            select(Payment.client_id, Payment.amount, Payment.paid_at)
+            .where(Payment.client_id.in_(all_client_ids))
+            .where(Payment.lead_id.is_(None))
+            .where(Payment.payment_type.in_(["first", "repeat"]))
+        ).all()
+        client_to_lead = {c: lid for lid, cids in client_ids_by_lead.items() for c in cids}
+        for cid, amount, paid_at in via_client:
+            lid = client_to_lead.get(cid)
+            if lid is None:
+                continue
+            rec = out[lid]
+            rec["revenue"] += float(amount or 0)
+            if paid_at and (rec["first_paid_at"] is None or paid_at < rec["first_paid_at"]):
+                rec["first_paid_at"] = paid_at
+
+    # Считаем цикл сделки: дни между created_at лида и первой оплатой
+    leads_data = session.execute(
+        select(Lead.id, Lead.created_at).where(Lead.id.in_(lead_ids))
+    ).all()
+    for lid, created_at in leads_data:
+        first_paid = out[lid]["first_paid_at"]
+        if first_paid and created_at:
+            delta = (first_paid - created_at).total_seconds() / 86400
+            out[lid]["cycle_days"] = max(0, round(delta, 1))
+
+    return out
+
+
 @app.get("/api/leads")
 def api_leads():
     q = (request.args.get("q") or "").strip()
@@ -296,7 +371,30 @@ def api_leads():
             stmt = stmt.where(or_(Lead.name.ilike(pat), Lead.username.ilike(pat), Lead.request.ilike(pat)))
         stmt = stmt.order_by(Lead.updated_at.desc())
         rows = session.execute(stmt).scalars().all()
-    return jsonify({"leads": [_lead_dict(l) for l in rows]})
+
+        # Для клиентов — выручка и цикл сделки + общая агрегация
+        metrics: dict[int, dict] = {}
+        agg = None
+        if status == "clients" and rows:
+            metrics = _client_metrics(session, [l.id for l in rows])
+            cycles = [m["cycle_days"] for m in metrics.values() if m["cycle_days"] is not None]
+            total_rev = sum(m["revenue"] for m in metrics.values())
+            avg_cycle = (sum(cycles) / len(cycles)) if cycles else None
+            agg = {
+                "count": len(rows),
+                "revenue": total_rev,
+                "avg_cycle_days": round(avg_cycle, 1) if avg_cycle is not None else None,
+            }
+
+    leads_out = []
+    for l in rows:
+        d = _lead_dict(l)
+        m = metrics.get(l.id)
+        if m:
+            d["revenue"] = m["revenue"]
+            d["cycle_days"] = m["cycle_days"]
+        leads_out.append(d)
+    return jsonify({"leads": leads_out, "clients_summary": agg})
 
 
 @app.get("/api/stages")
