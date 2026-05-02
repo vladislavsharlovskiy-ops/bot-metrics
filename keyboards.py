@@ -13,6 +13,7 @@ from stages import BY_CODE, FUNNEL, IGNORING, LOST, SOURCES, next_stage
 # Текст кнопок главного меню — используются и для отрисовки, и для роутинга.
 BTN_NEW       = "➕ Новый лид"
 BTN_LEADS     = "📋 Активные"
+BTN_CLIENTS   = "💚 Клиенты"
 BTN_IGNORING  = "🤐 Игнорят"
 BTN_TODAY     = "📊 Сегодня"
 BTN_WEEK      = "📅 Неделя"
@@ -25,9 +26,9 @@ BTN_DASHBOARD = "🌐 Дашборд"
 def main_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=BTN_NEW), KeyboardButton(text=BTN_LEADS), KeyboardButton(text=BTN_IGNORING)],
-            [KeyboardButton(text=BTN_TODAY), KeyboardButton(text=BTN_WEEK), KeyboardButton(text=BTN_MONTH)],
-            [KeyboardButton(text=BTN_CHANNELS), KeyboardButton(text=BTN_FUNNEL)],
+            [KeyboardButton(text=BTN_NEW), KeyboardButton(text=BTN_LEADS), KeyboardButton(text=BTN_CLIENTS)],
+            [KeyboardButton(text=BTN_IGNORING), KeyboardButton(text=BTN_TODAY), KeyboardButton(text=BTN_WEEK)],
+            [KeyboardButton(text=BTN_MONTH), KeyboardButton(text=BTN_CHANNELS), KeyboardButton(text=BTN_FUNNEL)],
             [KeyboardButton(text=BTN_DASHBOARD)],
         ],
         resize_keyboard=True,

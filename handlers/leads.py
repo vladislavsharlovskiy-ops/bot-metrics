@@ -5,10 +5,11 @@ from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 
 from db import get_session
 from keyboards import (
+    BTN_CLIENTS,
     BTN_IGNORING,
     BTN_LEADS,
     BTN_NEW,
@@ -21,11 +22,12 @@ from keyboards import (
     skip_kb,
     sources_kb,
 )
-from models import Lead, StageHistory
+from models import Client, Lead, Payment, StageHistory
 from sheets import sync_all, sync_lead
 from stages import (
     ACTIVE_CODES,
     BY_CODE,
+    CLIENT_CODES,
     IGNORING,
     IGNORING_CODES,
     LEAD_NEW,
@@ -234,6 +236,85 @@ async def _show_leads_page(message_or_call: Message | CallbackQuery, page: int) 
         await message_or_call.answer()
     else:
         await message_or_call.answer(text, reply_markup=kb)
+
+
+# ───────── /clients (оплатившие лиды + выручка по каждому) ─────────
+
+def _money_short(amount: float) -> str:
+    if not amount:
+        return "—"
+    return f"{int(round(amount)):,} ₽".replace(",", " ")
+
+
+@router.message(Command("clients"))
+@router.message(F.text == BTN_CLIENTS)
+async def cmd_clients(message: Message) -> None:
+    """Список оплативших лидов с суммой выручки от каждого."""
+    with get_session() as session:
+        # Берём лидов в стадиях клиентов + считаем выручку через Payment
+        # (через лид или через привязанного к лиду клиента)
+        leads = session.execute(
+            select(Lead)
+            .where(Lead.stage.in_(CLIENT_CODES))
+            .order_by(Lead.updated_at.desc())
+            .limit(PAGE_SIZE * 5)
+        ).scalars().all()
+
+        if not leads:
+            await message.answer("Клиентов пока нет.\nКогда лид оплатит — появится здесь.")
+            return
+
+        # Собираем выручку: все Payment где payment_type IN ('first', 'repeat'),
+        # привязанные к лиду напрямую или к клиенту, чей lead_id == lead.id
+        lead_ids = [l.id for l in leads]
+        client_ids_by_lead: dict[int, list[int]] = {lid: [] for lid in lead_ids}
+        client_rows = session.execute(
+            select(Client.id, Client.lead_id).where(Client.lead_id.in_(lead_ids))
+        ).all()
+        for cid, lid in client_rows:
+            if lid in client_ids_by_lead:
+                client_ids_by_lead[lid].append(cid)
+
+        revenue_by_lead: dict[int, float] = {lid: 0.0 for lid in lead_ids}
+        # Платежи привязанные к лиду напрямую
+        direct = session.execute(
+            select(Payment.lead_id, func.coalesce(func.sum(Payment.amount), 0))
+            .where(Payment.lead_id.in_(lead_ids))
+            .where(Payment.payment_type.in_(["first", "repeat"]))
+            .group_by(Payment.lead_id)
+        ).all()
+        for lid, total in direct:
+            revenue_by_lead[lid] = revenue_by_lead.get(lid, 0) + float(total or 0)
+        # Платежи через клиента
+        all_client_ids = [c for cids in client_ids_by_lead.values() for c in cids]
+        if all_client_ids:
+            via_client = session.execute(
+                select(Payment.client_id, func.coalesce(func.sum(Payment.amount), 0))
+                .where(Payment.client_id.in_(all_client_ids))
+                .where(Payment.payment_type.in_(["first", "repeat"]))
+                .group_by(Payment.client_id)
+            ).all()
+            client_to_total = {cid: float(t or 0) for cid, t in via_client}
+            for lid, cids in client_ids_by_lead.items():
+                for cid in cids:
+                    revenue_by_lead[lid] = revenue_by_lead.get(lid, 0) + client_to_total.get(cid, 0)
+
+    total_revenue = sum(revenue_by_lead.values())
+    items = []
+    for lead in leads:
+        rev = revenue_by_lead.get(lead.id, 0)
+        src = SOURCE_TITLES.get(lead.source, lead.source)
+        name = lead.name or lead.username or "—"
+        stage = BY_CODE[lead.stage].short
+        # Telegram-кнопка ограничена ~64 символами текста
+        label = f"#{lead.id} · {src} · {name} · {stage} · {_money_short(rev)}"
+        items.append((lead.id, label[:64]))
+
+    text = (
+        f"💚 <b>Клиенты:</b> {len(leads)}\n"
+        f"Выручка по списку: <b>{_money_short(total_revenue)}</b>"
+    )
+    await message.answer(text, parse_mode="HTML", reply_markup=leads_list_kb(items, 1, False))
 
 
 # ───────── /lead <id> and search ─────────

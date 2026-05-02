@@ -27,20 +27,35 @@
   .scroll-fade::-webkit-scrollbar { width: 8px; }
   .scroll-fade::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 4px; }
   /* ───── Воронка ───── */
-  .funnel { display: flex; flex-direction: column; gap: 6px; padding: 8px 0; }
+  .funnel { display: flex; flex-direction: column; gap: 6px; padding: 4px 0; }
   .funnel-row {
-    display: flex; align-items: center; justify-content: center;
-    margin: 0 auto; min-height: 40px;
-    padding: 8px 14px; border-radius: 10px;
-    color: #fff; font-weight: 600; font-size: 14px;
-    transition: width 0.25s ease, background 0.25s ease;
-    white-space: nowrap;
-    box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+    display: grid;
+    grid-template-columns: 100px 1fr 88px;
+    gap: 10px; align-items: center;
   }
-  .funnel-row.empty { color: #94a3b8; background: #f1f5f9 !important; box-shadow: none; }
-  .funnel-row .nm { opacity: 0.95; margin-right: 10px; }
-  .funnel-row .ct { font-weight: 700; }
-  .funnel-row .pc { opacity: 0.85; margin-left: 10px; font-weight: 500; font-size: 12px; }
+  .funnel-name {
+    text-align: right; font-size: 13px; font-weight: 500;
+    color: #475569; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .funnel-track {
+    height: 26px; background: #f1f5f9; border-radius: 6px;
+    position: relative; overflow: hidden;
+  }
+  .funnel-fill {
+    height: 100%; border-radius: 6px;
+    transition: width 0.3s ease, background 0.2s ease;
+  }
+  .funnel-stats {
+    font-size: 13px; font-variant-numeric: tabular-nums; color: #1e293b;
+    white-space: nowrap;
+  }
+  .funnel-stats .ct { font-weight: 700; font-size: 14px; }
+  .funnel-stats .pc { color: #64748b; margin-left: 6px; }
+  @media (max-width: 480px) {
+    .funnel-row { grid-template-columns: 80px 1fr 72px; gap: 8px; }
+    .funnel-name { font-size: 12px; }
+    .funnel-stats { font-size: 12px; }
+  }
 </style>
 </head>
 <body class="bg-slate-50 text-slate-800" x-data="dash()" x-init="init()">
@@ -66,7 +81,7 @@
   </header>
 
   <!-- Stats cards -->
-  <section class="grid grid-cols-2 md:grid-cols-4 gap-2 sm:gap-4 mb-4 sm:mb-6">
+  <section class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-2 sm:gap-4 mb-4 sm:mb-6">
     <template x-for="card in summaryCards" :key="card.label">
       <div class="bg-white rounded-xl border border-slate-200 p-3 sm:p-5 shadow-sm">
         <div class="text-slate-500 text-[10px] sm:text-xs font-medium uppercase tracking-wider leading-tight" x-text="card.label"></div>
@@ -93,13 +108,17 @@
         Нет событий за этот период
       </div>
       <div x-show="funnelHasData" class="funnel">
-        <template x-for="(s, i) in funnelView" :key="s.code">
-          <div class="funnel-row" :class="s.count === 0 ? 'empty' : ''"
-               :style="'width: ' + s.width + '%; background: ' + s.color + ';'"
-               :title="s.tooltip">
-            <span class="nm" x-text="s.short"></span>
-            <span class="ct" x-text="s.count"></span>
-            <span class="pc" x-text="s.label"></span>
+        <template x-for="s in funnelView" :key="s.code">
+          <div class="funnel-row" :title="s.tooltip">
+            <div class="funnel-name" x-text="s.short"></div>
+            <div class="funnel-track">
+              <div class="funnel-fill"
+                   :style="'width:' + s.fillPct + '%; background:' + s.color"></div>
+            </div>
+            <div class="funnel-stats">
+              <span class="ct" x-text="s.count"></span>
+              <span class="pc" x-text="s.label"></span>
+            </div>
           </div>
         </template>
       </div>
@@ -363,6 +382,12 @@ function dash() {
       const monthPayments = this.summary.month_payments || 0;
       const monthRevenue = this.summary.month_revenue || 0;
       const avgCheck = this.summary.month_avg_check || 0;
+      // Конверсия за месяц: оплатили / пришло заявок
+      const monthLeads = this.summary.month.lead_new || 0;
+      const monthPaid = (this.summary.month.paid || 0)
+                     + (this.summary.month.consulted || 0)
+                     + (this.summary.month.package_bought || 0);
+      const conv = monthLeads ? Math.round(monthPaid / monthLeads * 100) : null;
       return [
         { label: 'Заявок за неделю', value: weekLeads,
           hint: 'с понедельника', color: 'text-blue-600' },
@@ -372,6 +397,8 @@ function dash() {
           hint: 'first + repeat', color: 'text-emerald-700' },
         { label: 'Средний чек', value: this.formatMoney(avgCheck),
           hint: monthPayments ? 'за ' + monthPayments + ' оплат' : '—', color: 'text-slate-900' },
+        { label: 'Конверсия → оплата', value: conv === null ? '—' : (conv + '%'),
+          hint: monthLeads ? monthPaid + ' из ' + monthLeads : 'нет заявок', color: 'text-violet-600' },
       ];
     },
 
@@ -441,39 +468,35 @@ function dash() {
     },
 
     get funnelView() {
-      // Реактивная воронка из CSS-блоков. Каждая строка — этап, ширина = % от верха.
-      // Цвета — от голубого до зелёного, повторяет градацию этапов.
+      // Каждая строка: имя | полоска | число·процент. Ширина полоски — пропорция
+      // относительно эталона (верха воронки или максимума активных).
       const colors = ['#60a5fa', '#3b82f6', '#fbbf24', '#f59e0b', '#34d399', '#10b981', '#059669'];
       const stages = this.funnel.stages || [];
       const data = stages.map(s => s.count || 0);
       const top = data[0] || 0;
       const totalActive = data.reduce((a, b) => a + b, 0);
+      const maxData = Math.max(...data, 1);
       const isSnapshot = this.period === 'now';
-      const minWidth = 22; // даже пустые этапы видны контуром
       return stages.map((s, i) => {
         const count = data[i];
-        let width, label, tooltip;
+        let fillPct, label, tooltip;
         if (isSnapshot) {
-          // Снапшот — доля от всех активных
           const pct = totalActive > 0 ? Math.round(count / totalActive * 100) : 0;
-          // Ширина пропорциональна количеству, но минимум видим
-          const maxCount = Math.max(...data, 1);
-          width = Math.max(minWidth, Math.round(count / maxCount * 100));
-          label = totalActive > 0 ? pct + '%' : '';
-          tooltip = count + ' лидов сейчас на этапе «' + s.title + '»' +
-                    (totalActive > 0 ? ' (' + pct + '% от всех активных)' : '');
+          fillPct = Math.round(count / maxData * 100);
+          label = totalActive > 0 ? pct + '%' : '—';
+          tooltip = `${count} на этапе «${s.title}»` +
+                    (totalActive > 0 ? ` · ${pct}% от всех активных` : '');
         } else {
-          // Период — конверсия от верха воронки
           const pct = top > 0 ? Math.round(count / top * 100) : 0;
-          width = top > 0 ? Math.max(minWidth, pct) : minWidth;
+          // Полоска ограничена 100%, но цифра в подписи показывает реальный %
+          fillPct = top > 0 ? Math.min(100, Math.round(count / top * 100)) : 0;
+          label = top > 0 ? pct + '%' : '—';
           if (i === 0) {
-            label = '100%';
-            tooltip = count + ' заявок за период';
+            tooltip = `${count} заявок за период`;
           } else {
             const prev = data[i - 1];
             const prevPct = prev > 0 ? Math.round(count / prev * 100) : 0;
-            label = pct + '%';
-            tooltip = count + ' · ' + pct + '% от верха · ' + prevPct + '% от прошлого';
+            tooltip = `${count} · ${pct}% от верха · ${prevPct}% от прошлого этапа`;
           }
         }
         return {
@@ -481,9 +504,9 @@ function dash() {
           short: s.short,
           title: s.title,
           count,
-          width,
+          fillPct,
           label,
-          color: count === 0 ? '#f1f5f9' : colors[i % colors.length],
+          color: count === 0 ? '#cbd5e1' : colors[i % colors.length],
           tooltip,
         };
       });
