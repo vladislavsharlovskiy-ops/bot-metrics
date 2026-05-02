@@ -26,6 +26,21 @@
   .source-vk        { background: #e1f5fe; color: #0277bd; }
   .scroll-fade::-webkit-scrollbar { width: 8px; }
   .scroll-fade::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 4px; }
+  /* ───── Воронка ───── */
+  .funnel { display: flex; flex-direction: column; gap: 6px; padding: 8px 0; }
+  .funnel-row {
+    display: flex; align-items: center; justify-content: center;
+    margin: 0 auto; min-height: 40px;
+    padding: 8px 14px; border-radius: 10px;
+    color: #fff; font-weight: 600; font-size: 14px;
+    transition: width 0.25s ease, background 0.25s ease;
+    white-space: nowrap;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+  }
+  .funnel-row.empty { color: #94a3b8; background: #f1f5f9 !important; box-shadow: none; }
+  .funnel-row .nm { opacity: 0.95; margin-right: 10px; }
+  .funnel-row .ct { font-weight: 700; }
+  .funnel-row .pc { opacity: 0.85; margin-left: 10px; font-weight: 500; font-size: 12px; }
 </style>
 </head>
 <body class="bg-slate-50 text-slate-800" x-data="dash()" x-init="init()">
@@ -77,8 +92,16 @@
       <div x-show="!funnelHasData" class="text-center text-slate-400 text-sm py-8">
         Нет событий за этот период
       </div>
-      <div x-show="funnelHasData" style="height: 240px; position: relative;">
-        <canvas id="funnelChart"></canvas>
+      <div x-show="funnelHasData" class="funnel">
+        <template x-for="(s, i) in funnelView" :key="s.code">
+          <div class="funnel-row" :class="s.count === 0 ? 'empty' : ''"
+               :style="'width: ' + s.width + '%; background: ' + s.color + ';'"
+               :title="s.tooltip">
+            <span class="nm" x-text="s.short"></span>
+            <span class="ct" x-text="s.count"></span>
+            <span class="pc" x-text="s.label"></span>
+          </div>
+        </template>
       </div>
     </div>
 
@@ -144,8 +167,8 @@
     <div class="p-3 sm:p-5 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
       <div class="flex gap-1 text-sm overflow-x-auto -mx-3 px-3 sm:mx-0 sm:px-0">
         <button @click="setStatus('active')"   :class="leadFilter==='active'   ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">Активные</button>
+        <button @click="setStatus('clients')"  :class="leadFilter==='clients'  ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">💚 Клиенты</button>
         <button @click="setStatus('ignoring')" :class="leadFilter==='ignoring' ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">🤐 Игнорят</button>
-        <button @click="setStatus('won')"      :class="leadFilter==='won'      ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">Купили пакет</button>
         <button @click="setStatus('lost')"     :class="leadFilter==='lost'     ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">Отвалы</button>
         <button @click="setStatus('all')"      :class="leadFilter==='all'      ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">Все</button>
       </div>
@@ -310,7 +333,6 @@ function dash() {
     sources: [],
     newLeadOpen: false,
     newLead: { source: '', name: '', username: '', request: '' },
-    funnelChart: null,
     channelsChart: null,
 
     get todayLabel() {
@@ -337,15 +359,19 @@ function dash() {
 
     get summaryCards() {
       if (!this.summary) return [];
-      const todayLeads = this.summary.today.lead_new || 0;
-      const monthLeads = this.summary.month.lead_new || 0;
-      const monthPaid = (this.summary.month.paid || 0) + (this.summary.month.consulted || 0) + (this.summary.month.package_bought || 0);
-      const conv = monthLeads ? (monthPaid * 100 / monthLeads).toFixed(0) : '—';
+      const weekLeads = this.summary.week.lead_new || 0;
+      const monthPayments = this.summary.month_payments || 0;
+      const monthRevenue = this.summary.month_revenue || 0;
+      const avgCheck = this.summary.month_avg_check || 0;
       return [
-        { label: 'Заявок сегодня', value: todayLeads, hint: '', color: 'text-blue-600' },
-        { label: 'Оплат за месяц', value: monthPaid, hint: monthLeads + ' лидов · ' + conv + '%', color: 'text-emerald-600' },
-        { label: 'Активных в работе', value: this.summary.total_active, hint: 'не отвал, не пакет', color: 'text-slate-900' },
-        { label: 'Отвалилось всего', value: this.summary.total_lost, hint: 'за всё время', color: 'text-rose-500' },
+        { label: 'Заявок за неделю', value: weekLeads,
+          hint: 'с понедельника', color: 'text-blue-600' },
+        { label: 'Оплат за месяц', value: monthPayments,
+          hint: monthPayments ? 'клиентов: ' + this.summary.total_clients : 'пока нет', color: 'text-emerald-600' },
+        { label: 'Выручка за месяц', value: this.formatMoney(monthRevenue),
+          hint: 'first + repeat', color: 'text-emerald-700' },
+        { label: 'Средний чек', value: this.formatMoney(avgCheck),
+          hint: monthPayments ? 'за ' + monthPayments + ' оплат' : '—', color: 'text-slate-900' },
       ];
     },
 
@@ -402,7 +428,6 @@ function dash() {
         this.funnel = { stages: d.stages, lost: 0 };
         this.periodData = d;
       }
-      this.$nextTick(() => this.renderFunnelChart());
     },
 
     setPeriod(p) {
@@ -415,62 +440,52 @@ function dash() {
       this.loadLeads();
     },
 
-    renderFunnelChart() {
-      const ctx = document.getElementById('funnelChart');
-      if (!ctx) return;
-      const stages = this.funnel.stages;
-      const data = stages.map(s => s.count);
-      const isSnapshot = this.period === 'now';
+    get funnelView() {
+      // Реактивная воронка из CSS-блоков. Каждая строка — этап, ширина = % от верха.
+      // Цвета — от голубого до зелёного, повторяет градацию этапов.
+      const colors = ['#60a5fa', '#3b82f6', '#fbbf24', '#f59e0b', '#34d399', '#10b981', '#059669'];
+      const stages = this.funnel.stages || [];
+      const data = stages.map(s => s.count || 0);
       const top = data[0] || 0;
       const totalActive = data.reduce((a, b) => a + b, 0);
-      // На снапшоте показываем долю от всех активных, на периодах — конверсию от верха воронки
-      const labels = stages.map((s, i) => {
+      const isSnapshot = this.period === 'now';
+      const minWidth = 22; // даже пустые этапы видны контуром
+      return stages.map((s, i) => {
+        const count = data[i];
+        let width, label, tooltip;
         if (isSnapshot) {
-          if (totalActive === 0) return s.short;
-          const pct = Math.round(data[i] / totalActive * 100);
-          return s.short + ' · ' + pct + '%';
+          // Снапшот — доля от всех активных
+          const pct = totalActive > 0 ? Math.round(count / totalActive * 100) : 0;
+          // Ширина пропорциональна количеству, но минимум видим
+          const maxCount = Math.max(...data, 1);
+          width = Math.max(minWidth, Math.round(count / maxCount * 100));
+          label = totalActive > 0 ? pct + '%' : '';
+          tooltip = count + ' лидов сейчас на этапе «' + s.title + '»' +
+                    (totalActive > 0 ? ' (' + pct + '% от всех активных)' : '');
+        } else {
+          // Период — конверсия от верха воронки
+          const pct = top > 0 ? Math.round(count / top * 100) : 0;
+          width = top > 0 ? Math.max(minWidth, pct) : minWidth;
+          if (i === 0) {
+            label = '100%';
+            tooltip = count + ' заявок за период';
+          } else {
+            const prev = data[i - 1];
+            const prevPct = prev > 0 ? Math.round(count / prev * 100) : 0;
+            label = pct + '%';
+            tooltip = count + ' · ' + pct + '% от верха · ' + prevPct + '% от прошлого';
+          }
         }
-        if (i === 0 || top === 0) return s.short;
-        const pct = Math.round(data[i] / top * 100);
-        return s.short + ' · ' + pct + '%';
-      });
-      const colors = ['#93c5fd', '#60a5fa', '#fcd34d', '#fbbf24', '#86efac', '#4ade80', '#16a34a'];
-      if (this.funnelChart) this.funnelChart.destroy();
-      this.funnelChart = new Chart(ctx, {
-        type: 'bar',
-        data: { labels, datasets: [{ data, backgroundColor: colors, borderRadius: 6 }] },
-        options: {
-          indexAxis: 'y',
-          responsive: true,
-          maintainAspectRatio: false,
-          animation: false,
-          plugins: {
-            legend: { display: false },
-            tooltip: {
-              callbacks: {
-                label: (item) => {
-                  const i = item.dataIndex;
-                  const count = data[i];
-                  const lines = [count + ' шт.'];
-                  if (isSnapshot) {
-                    if (totalActive > 0) {
-                      lines.push('Доля активных: ' + Math.round(count / totalActive * 100) + '%');
-                    }
-                  } else {
-                    if (top > 0) {
-                      lines.push('От верха: ' + Math.round(count / top * 100) + '%');
-                    }
-                    if (i > 0 && data[i - 1] > 0) {
-                      lines.push('От прошлого этапа: ' + Math.round(count / data[i - 1] * 100) + '%');
-                    }
-                  }
-                  return lines;
-                }
-              }
-            }
-          },
-          scales: { x: { ticks: { precision: 0 } } },
-        }
+        return {
+          code: s.code,
+          short: s.short,
+          title: s.title,
+          count,
+          width,
+          label,
+          color: count === 0 ? '#f1f5f9' : colors[i % colors.length],
+          tooltip,
+        };
       });
     },
 

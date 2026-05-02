@@ -35,7 +35,10 @@ IGNORING_STAGE = Stage(IGNORING, "Игнорит", "Игнор")
 
 BY_CODE: dict[str, Stage] = {s.code: s for s in [*FUNNEL, LOST_STAGE, IGNORING_STAGE]}
 
-ACTIVE_CODES = {LEAD_NEW, QUALIFIED, BREAKDOWN_SENT, AGREED, PAID, CONSULTED}
+# Активные = лиды, которые ещё не оплатили. После оплаты лид становится клиентом.
+ACTIVE_CODES = {LEAD_NEW, QUALIFIED, BREAKDOWN_SENT, AGREED}
+# Клиенты = тот, кто уже оплатил (хоть консультацию, хоть пакет).
+CLIENT_CODES = {PAID, CONSULTED, PACKAGE_BOUGHT}
 IGNORING_CODES = {IGNORING}
 
 

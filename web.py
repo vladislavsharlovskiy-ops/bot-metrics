@@ -12,6 +12,7 @@ from models import Lead, Payment, StageHistory
 from stages import (
     ACTIVE_CODES,
     BY_CODE,
+    CLIENT_CODES,
     CONSULTED,
     FUNNEL,
     IGNORING,
@@ -111,25 +112,45 @@ def index():
 
 @app.get("/api/summary")
 def api_summary():
-    """Top-level cards: today + this month."""
+    """Шапка дашборда: заявки за неделю + оплаты/выручка/средний чек за месяц."""
     today_s, today_e = _today_range()
+    week_s, week_e = _week_range()
     month_s, month_e = _month_range()
     today = _counts_in_period(today_s, today_e)
+    week = _counts_in_period(week_s, week_e)
     month = _counts_in_period(month_s, month_e)
 
     with get_session() as session:
         total_active = session.execute(
             select(func.count(Lead.id)).where(Lead.stage.in_(ACTIVE_CODES))
         ).scalar_one()
-        total_lost = session.execute(
-            select(func.count(Lead.id)).where(Lead.stage == LOST)
+        total_clients = session.execute(
+            select(func.count(Lead.id)).where(Lead.stage.in_(CLIENT_CODES))
         ).scalar_one()
+
+        # Реальные платежи за месяц — игнорируем unclassified/ignored
+        month_pay = session.execute(
+            select(
+                func.coalesce(func.sum(Payment.amount), 0),
+                func.count(Payment.id),
+            )
+            .where(Payment.paid_at >= month_s)
+            .where(Payment.paid_at < month_e)
+            .where(Payment.payment_type.in_(["first", "repeat"]))
+        ).one()
+        month_revenue = float(month_pay[0] or 0)
+        month_payments = int(month_pay[1] or 0)
+        month_avg = (month_revenue / month_payments) if month_payments else 0
 
     return jsonify({
         "today": today,
+        "week": week,
         "month": month,
         "total_active": total_active,
-        "total_lost": total_lost,
+        "total_clients": total_clients,
+        "month_revenue": month_revenue,
+        "month_payments": month_payments,
+        "month_avg_check": month_avg,
     })
 
 
@@ -261,6 +282,8 @@ def api_leads():
         stmt = select(Lead)
         if status == "active":
             stmt = stmt.where(Lead.stage.in_(ACTIVE_CODES))
+        elif status == "clients":
+            stmt = stmt.where(Lead.stage.in_(CLIENT_CODES))
         elif status == "lost":
             stmt = stmt.where(Lead.stage == LOST)
         elif status == "won":
