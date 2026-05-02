@@ -570,6 +570,10 @@ def api_external_create():
     Защищённый эндпоинт для внешних ботов (например, отдельный лид-бот).
     Принимает то же тело, что и /api/leads, но требует заголовок X-API-Key.
     Если LEADS_API_KEY не задан в env — эндпоинт отключён (403).
+
+    После успешного создания — пушит в Telegram владельцу карточку лида
+    с пометкой «Автоматически из лид-бота» и кнопками управления. Ошибка
+    отправки не валит ответ — лид всё равно сохранён.
     """
     if not LEADS_API_KEY:
         return jsonify({"error": "external api disabled"}), 403
@@ -584,6 +588,14 @@ def api_external_create():
     lead, err = _create_lead_from_payload(body)
     if err:
         return jsonify({"error": err[0]}), err[1]
+
+    # Push владельцу — после сохранения, перед возвратом ответа
+    try:
+        from tg_notify import notify_external_lead
+        notify_external_lead(lead)
+    except Exception as e:
+        log.warning("external lead notify failed: %s", e)
+
     return jsonify({"ok": True, "lead": lead})
 
 
