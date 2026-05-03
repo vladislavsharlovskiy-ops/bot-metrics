@@ -30,7 +30,7 @@ router = Router(name="business")
 SOURCE_KEYWORDS: dict[str, tuple[str, ...]] = {
     "instagram": ("instagram", "инстаграм", "инстаграмм", "инсту", "инсты", "инста", "insta", "ig"),
     "youtube":   ("youtube", "ютуб", "ютуба", "ютьюб", "ютубе", "yt"),
-    "telegram":  ("telegram", "телеграм", "телеграмм", "тг", "tg"),
+    "telegram":  ("telegram", "телеграм", "телеграмм", "телеграме", "телеграмме", "тг", "tg"),
     "tiktok":    ("tiktok", "тикток", "тиктока", "тиктоке"),
     "rutube":    ("rutube", "рутуб", "рутуба", "рутубе"),
     "vk":        ("vk", "вк", "вконтакте", "вконтакта"),
@@ -42,6 +42,17 @@ def detect_source(text: str | None) -> str | None:
     if not text:
         return None
     norm = text.lower().replace("ё", "е")
+
+    # Особое правило: упоминание «бот» (в любой форме — бот, бота, боте, ботом)
+    # означает, что клиент пришёл через наш лид-бот в Telegram, а исходный
+    # источник трафика для лид-бота — Instagram. Поэтому фразы вида
+    # «я из Telegram-бота», «нашла вас через бота» → источник Instagram.
+    # Telegram-канал и просто «тг»/«телеграм» без «бот» остаются как telegram.
+    if re.search(r"(?<![а-яa-z0-9])бот[а-я]{0,4}(?![а-яa-z0-9])", norm):
+        return "instagram"
+    if re.search(r"(?<![a-zа-я0-9])bots?(?![a-zа-я0-9])", norm):
+        return "instagram"
+
     for code, keywords in SOURCE_KEYWORDS.items():
         for kw in keywords:
             # Границы слова, чтобы «вк» не матчился внутри «вконец» и т.п.
