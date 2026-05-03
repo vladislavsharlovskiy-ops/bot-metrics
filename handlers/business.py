@@ -91,11 +91,18 @@ async def on_business_message(message: Message) -> None:
         ).scalars().first()
 
         if lead is None:
+            # Новый человек, которого ещё нет в базе. Заводим только если
+            # в сообщении есть ключевик источника — иначе это, скорее всего,
+            # старый контакт владельца, продолжающий обычную переписку
+            # («Ага спасибо», «Закинула деньги»), а не новая заявка.
+            if detected is None:
+                log.info("business: skip non-lead message tg_id=%s", user.id)
+                return
             lead = Lead(
                 name=name,
                 username=username,
                 telegram_user_id=user.id,
-                source=detected or "unknown",
+                source=detected,
                 request=text or None,
                 stage=LEAD_NEW,
             )
