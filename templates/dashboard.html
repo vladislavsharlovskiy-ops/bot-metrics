@@ -409,12 +409,12 @@ function dash() {
           hint: this.summary.month_label || '', color: 'text-blue-600' },
         { label: 'Оплат за месяц', value: monthPayments,
           hint: monthPayments ? 'клиентов: ' + monthClients : 'пока нет', color: 'text-emerald-600' },
-        { label: 'Конверсия → оплата', value: conv === null ? '—' : (conv + '%'),
+        { label: 'Заявка → оплата', value: conv === null ? '—' : (conv + '%'),
           hint: monthLeads ? monthPaid + ' из ' + monthLeads : 'нет заявок', color: 'text-violet-600' },
         { label: 'Средний чек', value: this.formatMoney(avgCheck),
           hint: monthPayments ? 'за ' + monthPayments + ' оплат' : '—', color: 'text-slate-900' },
         { label: 'Выручка за месяц', value: this.formatMoney(monthRevenue),
-          hint: 'first + repeat', color: 'text-emerald-700' },
+          hint: 'первичка + повторка', color: 'text-emerald-700' },
       ];
     },
 
