@@ -1,6 +1,7 @@
 import logging
 import os
 import shutil
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -9,6 +10,15 @@ log = logging.getLogger("config")
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
+
+# Часовой пояс. По умолчанию Москва (UTC+3) — чтобы datetime.now() и время
+# в карточках совпадало с тем, что владелец видит у себя в Telegram.
+# Можно переопределить через env var TZ (например, "Europe/Moscow", "UTC").
+os.environ.setdefault("TZ", "Europe/Moscow")
+try:
+    time.tzset()
+except AttributeError:
+    pass  # Windows — tzset недоступен, но прод у нас Linux
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 OWNER_ID = int(os.environ["OWNER_ID"])
