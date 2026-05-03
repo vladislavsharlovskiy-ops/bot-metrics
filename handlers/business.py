@@ -72,6 +72,8 @@ async def on_business_message(message: Message) -> None:
     name = (user.full_name or "").strip() or None
     username = _format_username(user.username)
 
+    is_new = False
+    lead_payload: dict | None = None
     with get_session() as session:
         lead = session.execute(
             select(Lead).where(Lead.telegram_user_id == user.id)
@@ -91,8 +93,8 @@ async def on_business_message(message: Message) -> None:
             session.add(StageHistory(lead_id=lead.id, stage=LEAD_NEW))
             session.commit()
             session.refresh(lead)
-            lead_id = lead.id
-            log.info("business: created lead id=%s tg_id=%s source=%s", lead_id, user.id, lead.source)
+            is_new = True
+            log.info("business: created lead id=%s tg_id=%s source=%s", lead.id, user.id, lead.source)
         else:
             if name and lead.name != name:
                 lead.name = name
@@ -105,7 +107,19 @@ async def on_business_message(message: Message) -> None:
             if not lead.request and text:
                 lead.request = text
             session.commit()
-            lead_id = lead.id
+            session.refresh(lead)
+
+        lead_id = lead.id
+        if is_new:
+            from web import _lead_dict
+            lead_payload = _lead_dict(lead)
+
+    if is_new and lead_payload is not None:
+        try:
+            from tg_notify import notify_external_lead
+            notify_external_lead(lead_payload, header="📥 <b>Новый лид из Telegram Business</b>")
+        except Exception as e:
+            log.warning("business notify failed: %s", e)
 
     try:
         from sheets import sync_lead

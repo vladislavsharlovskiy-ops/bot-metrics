@@ -77,16 +77,16 @@ def _external_lead_keyboard(lead_id: int) -> dict:
     }
 
 
-def notify_external_lead(lead: dict) -> bool:
+def notify_external_lead(lead: dict, header: str = "🤖 <b>Автоматически из лид-бота</b>") -> bool:
     """
-    Уведомление владельцу о лиде, пришедшем через /api/external/leads.
-    Карточка как при ручном создании, плюс пометка «Автоматически из лид-бота».
+    Уведомление владельцу о новом лиде. Заголовок настраивается, чтобы
+    отличать источник (внешний лид-бот, Telegram Business и т.п.).
     Возвращает True если отправлено, False если нет (не бросает исключений).
     """
     try:
         lead_id = lead["id"]
         lines = [
-            "🤖 <b>Автоматически из лид-бота</b>",
+            header,
             "",
             f"<b>Лид #{lead_id}</b>",
             f"Этап: <b>{lead.get('stage_title') or '—'}</b>",
