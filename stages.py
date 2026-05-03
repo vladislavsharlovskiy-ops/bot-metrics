@@ -56,6 +56,7 @@ SOURCES = [
     ("tiktok",    "TikTok"),
     ("rutube",    "Rutube"),
     ("vk",        "VK"),
+    ("unknown",   "Не определён"),
 ]
 
 

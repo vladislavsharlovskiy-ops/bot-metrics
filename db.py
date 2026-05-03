@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from config import DB_PATH
@@ -34,6 +34,17 @@ def _set_sqlite_pragmas(dbapi_connection, connection_record):
 
 def init_db() -> None:
     Base.metadata.create_all(engine)
+    _run_migrations()
+
+
+def _run_migrations() -> None:
+    """Лёгкие in-place миграции для SQLite. Только ADD COLUMN: безопасно, обратимо."""
+    insp = inspect(engine)
+    existing = {c["name"] for c in insp.get_columns("leads")}
+    with engine.begin() as conn:
+        if "telegram_user_id" not in existing:
+            conn.execute(text("ALTER TABLE leads ADD COLUMN telegram_user_id INTEGER"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_leads_telegram_user_id ON leads(telegram_user_id)"))
 
 
 def get_session() -> Session:

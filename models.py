@@ -21,6 +21,7 @@ class Lead(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[Optional[str]] = mapped_column(String(200))
     username: Mapped[Optional[str]] = mapped_column(String(100))
+    telegram_user_id: Mapped[Optional[int]] = mapped_column(Integer, index=True)
     source: Mapped[str] = mapped_column(String(40))
     request: Mapped[Optional[str]] = mapped_column(Text)
     notes: Mapped[Optional[str]] = mapped_column(Text)

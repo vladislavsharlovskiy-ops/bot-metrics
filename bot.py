@@ -11,7 +11,7 @@ from aiogram.types import BotCommand, TelegramObject, Update
 
 from config import ALLOWED_USERS, BOT_TOKEN, OPEN_ACCESS, OWNER_ID
 from db import init_db
-from handlers import leads, notifications, payments, reports
+from handlers import business, leads, notifications, payments, reports
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("bot")
@@ -28,6 +28,16 @@ class OwnerOnlyMiddleware(BaseMiddleware):
     ) -> Any:
         user = data.get("event_from_user")
         if OPEN_ACCESS:
+            return await handler(event, data)
+        # Business-апдейты приходят от клиентов владельца (не из ALLOWED_USERS),
+        # но это легитимный канал — фильтр здесь обходится, отдельный роутер
+        # сам решает, что с ними делать.
+        if isinstance(event, Update) and (
+            event.business_message is not None
+            or event.edited_business_message is not None
+            or event.business_connection is not None
+            or event.deleted_business_messages is not None
+        ):
             return await handler(event, data)
         if user is None or user.id not in ALLOWED_USERS:
             log.warning("Blocked update from user_id=%s", getattr(user, "id", None))
@@ -74,6 +84,7 @@ async def main() -> None:
     dp.include_router(reports.router)
     dp.include_router(notifications.router)
     dp.include_router(payments.router)
+    dp.include_router(business.router)
     await bot.set_my_commands(BOT_COMMANDS)
     log.info("Bot started")
     asyncio.create_task(notifications.digest_loop(bot))
