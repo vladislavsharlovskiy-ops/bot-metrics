@@ -24,6 +24,7 @@
   .source-tiktok    { background: #e8eaf6; color: #1a1a1a; }
   .source-rutube    { background: #f3e5f5; color: #6a1b9a; }
   .source-vk        { background: #e1f5fe; color: #0277bd; }
+  .source-unknown   { background: #f1f5f9; color: #475569; }
   .scroll-fade::-webkit-scrollbar { width: 8px; }
   .scroll-fade::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 4px; }
   /* ───── Воронка ───── */
@@ -326,7 +327,7 @@
       <div>
         <label class="text-xs uppercase tracking-wider text-slate-500 font-medium">Источник</label>
         <div class="grid grid-cols-3 gap-2 mt-1">
-          <template x-for="src in sources" :key="src.code">
+          <template x-for="src in sources.filter(s => s.code !== 'unknown')" :key="src.code">
             <button @click="newLead.source = src.code"
                     :class="newLead.source === src.code ? 'bg-blue-600 text-white border-blue-600' : 'bg-white border-slate-200 hover:bg-slate-50'"
                     class="px-3 py-2 border rounded-lg text-sm font-medium" x-text="src.title"></button>
@@ -518,7 +519,7 @@ function dash() {
       const filtered = (this.channels || []).filter(c => c.leads > 0);
       const labels = filtered.map(c => c.title);
       const data = filtered.map(c => c.leads);
-      const palette = ['#ec4899', '#ef4444', '#3b82f6', '#1f2937', '#a855f7', '#0ea5e9'];
+      const palette = ['#ec4899', '#ef4444', '#3b82f6', '#1f2937', '#a855f7', '#0ea5e9', '#94a3b8'];
       if (this.channelsChart) this.channelsChart.destroy();
       if (!data.length) return;
       this.channelsChart = new Chart(ctx, {
