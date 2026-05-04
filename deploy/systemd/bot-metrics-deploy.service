@@ -1,0 +1,19 @@
+[Unit]
+Description=bot-metrics — auto-deploy listener (GitHub webhook)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bot
+Group=bot
+WorkingDirectory=/opt/bot-metrics
+EnvironmentFile=/opt/bot-metrics/.env
+ExecStart=/usr/bin/python3 -u /opt/bot-metrics/bin/deploy_listener.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
