@@ -1,9 +1,10 @@
 """
-Утренняя сводка по «зависшим» лидам — раз в два дня.
+Утренняя сводка по «зависшим» лидам — каждый день в 9:00 МСК.
 
-В 9:00 МСК бот присылает владельцу список лидов, по которым 2+ дней нет
-движения: этап «Разбор отправлен» И «Игнорят». По каждому — кнопки действий
-(те же callback_data, что у карточки лида).
+В сводку попадают лиды на этапах «Разбор отправлен» и «Игнорят», у которых
+уже 2+ дня нет движения (Lead.updated_at). Когда владелец меняет статус
+лида — updated_at обновляется и лид перестаёт показываться, пока снова
+не «зависнет» на 2 дня.
 """
 
 from __future__ import annotations
@@ -29,7 +30,6 @@ log = logging.getLogger("digest")
 DIGEST_HOUR = 9
 DIGEST_MINUTE = 0
 STUCK_DAYS = 2
-DIGEST_PERIOD_DAYS = 2  # раз в сколько дней присылать сводку
 DIGEST_STAGES = {BREAKDOWN_SENT, IGNORING}
 MSK = ZoneInfo("Europe/Moscow")
 
@@ -113,36 +113,22 @@ async def cmd_digest(message: Message, bot: Bot) -> None:
     await send_digest(bot)
 
 
-def _seconds_until_next_run(last_sent: datetime | None) -> float:
-    """
-    Следующее ближайшее окно DIGEST_HOUR:DIGEST_MINUTE МСК, через которое
-    после last_sent прошло >= DIGEST_PERIOD_DAYS суток. Если ещё ни разу
-    не слали — берём ближайшее окно (через 9:00 завтра либо сегодня).
-    """
+def _seconds_until_next_run() -> float:
     now = datetime.now(MSK)
     target = now.replace(hour=DIGEST_HOUR, minute=DIGEST_MINUTE, second=0, microsecond=0)
     if target <= now:
         target += timedelta(days=1)
-    if last_sent is not None:
-        earliest = last_sent + timedelta(days=DIGEST_PERIOD_DAYS)
-        while target < earliest:
-            target += timedelta(days=1)
     return (target - now).total_seconds()
 
 
 async def digest_loop(bot: Bot) -> None:
-    """Бесконечный цикл: спим до следующего окна (раз в DIGEST_PERIOD_DAYS дней в 9:00 МСК)."""
-    last_sent: datetime | None = None
+    """Бесконечный цикл: спим до ближайших 9:00 МСК, отправляем, повторяем."""
     while True:
-        wait = _seconds_until_next_run(last_sent)
-        log.info(
-            "Next digest in %.0f minutes (every %d days at %02d:%02d МСК)",
-            wait / 60, DIGEST_PERIOD_DAYS, DIGEST_HOUR, DIGEST_MINUTE,
-        )
+        wait = _seconds_until_next_run()
+        log.info("Next digest in %.0f minutes (at %02d:%02d МСК)", wait / 60, DIGEST_HOUR, DIGEST_MINUTE)
         try:
             await asyncio.sleep(wait)
             await send_digest(bot)
-            last_sent = datetime.now(MSK)
         except asyncio.CancelledError:
             raise
         except Exception as e:
