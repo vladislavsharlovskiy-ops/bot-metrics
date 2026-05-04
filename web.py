@@ -87,13 +87,28 @@ def _month_range():
 
 
 def _counts_in_period(start, end, source=None):
-    """Distinct lead counts that reached each funnel stage in [start, end)."""
+    """
+    Сколько лидов «достигли этапа X или дальше» в периоде [start, end).
+
+    Раньше считали лидов с stage_history С КОНКРЕТНЫМ stage в периоде. Это
+    ломало монотонность воронки: лид, попавший в БД сразу с LEAD_NEW + PAID
+    (например, через webhook Prodamus или /addpayment), пропускал
+    промежуточные этапы — у него нет записей для qualified, breakdown_sent,
+    agreed, поэтому Оплата получалась больше, чем Согласие.
+
+    Теперь для каждого этапа берём лидов, у которых есть запись stage_history
+    либо для самого этапа, либо для любого ПОЗДНЕГО. Раз лид дошёл до Оплаты —
+    значит логически прошёл через все предыдущие этапы, даже если они не
+    зафиксированы отдельной записью. Воронка получается строго монотонной:
+    Заявка ≥ Квал ≥ Разбор ≥ Согласие ≥ Оплата ≥ Консультация ≥ Пакет.
+    """
     out = {}
     with get_session() as session:
-        for s in FUNNEL:
+        for i, s in enumerate(FUNNEL):
+            later_codes = [st.code for st in FUNNEL[i:]]
             q = (
                 select(func.count(func.distinct(StageHistory.lead_id)))
-                .where(StageHistory.stage == s.code)
+                .where(StageHistory.stage.in_(later_codes))
                 .where(StageHistory.changed_at >= start)
                 .where(StageHistory.changed_at < end)
             )
