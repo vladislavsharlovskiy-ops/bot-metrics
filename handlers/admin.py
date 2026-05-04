@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -92,6 +93,14 @@ async def cmd_redeploy(message: Message) -> None:
     if not os.path.exists(DEPLOY_SCRIPT):
         await message.answer(f"⚠ Не найден {DEPLOY_SCRIPT}.")
         return
+
+    # Self-sync: копируем свежий deploy.sh, backup.sh, deploy_listener.py
+    # из репы в /opt/bot-metrics/bin/. Без этого новые правки в deploy.sh
+    # (sudoers re-install, cron update, и т.п.) не подхватываются — старая
+    # копия в bin/ исполняется как и при первой установке.
+    # Каталог bin/ owned by bot:bot, права на запись есть.
+    _sync_bin_from_repo()
+
     await message.answer(
         "🚀 Подтягиваю свежий код и перезапускаю сервисы.\n"
         "Бот сейчас уйдёт на 10-20 секунд, после этого пиши /help для проверки."
@@ -107,6 +116,28 @@ async def cmd_redeploy(message: Message) -> None:
     except Exception as e:
         log.warning("redeploy spawn error: %s", e)
         await message.answer(f"⚠ Не удалось запустить деплой: {e}")
+
+
+_REPO_BIN_PAIRS = [
+    ("/opt/bot-metrics/repo/deploy/deploy.sh",          "/opt/bot-metrics/bin/deploy.sh"),
+    ("/opt/bot-metrics/repo/deploy/backup.sh",          "/opt/bot-metrics/bin/backup.sh"),
+    ("/opt/bot-metrics/repo/deploy/deploy_listener.py", "/opt/bot-metrics/bin/deploy_listener.py"),
+]
+
+
+def _sync_bin_from_repo() -> list[str]:
+    """Копирует bin-скрипты из репы в /opt/bot-metrics/bin/. Возвращает список синканного."""
+    synced: list[str] = []
+    for src, dst in _REPO_BIN_PAIRS:
+        if not os.path.exists(src):
+            continue
+        try:
+            shutil.copy2(src, dst)
+            os.chmod(dst, 0o755)
+            synced.append(os.path.basename(dst))
+        except Exception as e:
+            log.warning("bin sync %s -> %s failed: %s", src, dst, e)
+    return synced
 
 
 # ─── /setdashboardurl ──────────────────────────────────────────────
