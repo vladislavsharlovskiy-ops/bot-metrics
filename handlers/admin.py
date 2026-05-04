@@ -609,6 +609,111 @@ async def cmd_diag(message: Message) -> None:
     await message.answer(text, parse_mode="HTML")
 
 
+# ─── /testprodamus ─────────────────────────────────────────────────
+
+@router.message(Command("testprodamus"))
+async def cmd_test_prodamus(message: Message) -> None:
+    """
+    Проверяет, что PRODAMUS_SECRET_KEY на сервере совпадает с тем, чем
+    Prodamus подписывает webhook'и. Шлёт тестовый POST на локальный
+    /webhook/prodamus с payment_status='pending' (нерабочий статус —
+    обработчик его игнорирует, в БД ничего не запишется).
+
+    HTTP 200  → ключ совпадает, реальные оплаты будут записываться сами
+    HTTP 403  → ключ не совпадает, нужен /setprodamuskey
+    """
+    if not _is_owner(message):
+        return
+
+    key = os.environ.get("PRODAMUS_SECRET_KEY", "").strip()
+    if not key:
+        await message.answer(
+            "⚠ <code>PRODAMUS_SECRET_KEY</code> в .env пустой.\n"
+            "Сначала задай: <code>/setprodamuskey &lt;ключ&gt;</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    # Импорт лениво — модуль prodamus тащит свои зависимости
+    try:
+        from prodamus import _build_signature, parse_form_to_dict
+        import urllib.parse
+    except Exception as e:
+        await message.answer(f"⚠ Не получается импортировать prodamus.py: {e}")
+        return
+
+    test_data = {
+        "date": datetime.now().isoformat(timespec="seconds"),
+        "order_id": "diag-" + str(int(datetime.now().timestamp())),
+        "order_num": "Diagnostic Test (testprodamus)",
+        "sum": "1.00",
+        "currency": "rub",
+        "customer_phone": "+70000000000",
+        "customer_email": "test@diag.local",
+        # Сознательно НЕ "success" — обработчик такие пропускает, в БД не пишет
+        "payment_status": "pending",
+        "payment_status_description": "Diagnostic test, ignore",
+    }
+
+    nested = parse_form_to_dict(test_data)
+    sig = _build_signature(nested, key)
+    form_with_sig = {**test_data, "signature": sig}
+    form_data = urllib.parse.urlencode(form_with_sig)
+
+    await message.answer(
+        f"🔄 Шлю тестовый webhook со свежей подписью "
+        f"(ключ {len(key)} симв.)…"
+    )
+
+    try:
+        result = subprocess.run(
+            [
+                "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                "--max-time", "10",
+                "-X", "POST",
+                "-H", "Content-Type: application/x-www-form-urlencoded",
+                "--data", form_data,
+                "http://127.0.0.1:8765/webhook/prodamus",
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+        http_code = result.stdout.strip()
+
+        if http_code == "200":
+            await message.answer(
+                "✅ <b>Webhook работает!</b>\n\n"
+                "Тестовый POST с правильной HMAC-SHA256 подписью → <b>HTTP 200</b>.\n\n"
+                "Это значит:\n"
+                "• <code>PRODAMUS_SECRET_KEY</code> в .env совпадает с тем, что "
+                "Prodamus использует для подписи\n"
+                "• Реальные оплаты с <code>payment_status=success</code> теперь "
+                "запишутся в БД сами и появятся в дашборде\n\n"
+                "В БД ничего не добавилось — тестовый <code>payment_status=pending</code> "
+                "обработчик пропускает.",
+                parse_mode="HTML",
+            )
+        elif http_code == "403":
+            await message.answer(
+                "❌ <b>Webhook валится с HTTP 403 (bad signature)</b>\n\n"
+                f"<code>PRODAMUS_SECRET_KEY</code> ({len(key)} симв.) в .env есть, "
+                "но HMAC не совпадает с тем, что вычисляется. Скорее всего:\n"
+                "• в ключе при копировании затесался пробел/перенос строки\n"
+                "• ключ не от того кабинета Prodamus\n\n"
+                "Перезайди в <code>panel.prodamus.ru</code> → Настройки → "
+                "Защита от поддельных уведомлений → скопируй ключ ещё раз "
+                "(аккуратно, без пробелов) → <code>/setprodamuskey &lt;ключ&gt;</code>",
+                parse_mode="HTML",
+            )
+        else:
+            await message.answer(
+                f"⚠ Webhook вернул HTTP <b>{http_code}</b> — не 200 и не 403.\n"
+                "Что-то нестандартное. Пришли скрин, разберусь.",
+                parse_mode="HTML",
+            )
+    except Exception as e:
+        await message.answer(f"⚠ Ошибка теста: {e}")
+
+
 # ─── /admin (помощь) ───────────────────────────────────────────────
 
 @router.message(Command("admin"))
@@ -622,6 +727,8 @@ async def cmd_admin_help(message: Message) -> None:
         "<code>/setdashboardurl &lt;url&gt;</code> — сменить адрес дашборда\n"
         "<code>/setprodamuskey &lt;key&gt;</code> — задать секретный ключ "
         "Prodamus (если webhook'и валятся с 'bad signature')\n"
+        "<code>/testprodamus</code> — проверить, что ключ Prodamus в .env "
+        "совпадает с тем, что используется для подписи (без записи в БД)\n"
         "<code>/addpayment &lt;…&gt;</code> — дозаписать платёж вручную "
         "(если webhook потерял оплату). Потом /fixpay для классификации\n"
         "<code>/forcehttps</code> — принудительно включить http→https редирект "
