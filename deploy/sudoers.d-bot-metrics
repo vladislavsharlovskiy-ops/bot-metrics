@@ -4,5 +4,5 @@ bot ALL=(root) NOPASSWD: /opt/bot-metrics/bin/deploy.sh
 bot ALL=(root) NOPASSWD: /bin/systemctl restart bot-metrics-bot
 bot ALL=(root) NOPASSWD: /bin/systemctl restart bot-metrics-web
 bot ALL=(root) NOPASSWD: /bin/systemctl restart bot-metrics-deploy
-bot ALL=(root) NOPASSWD: /bin/bash /opt/bot-metrics/repo/tools/fix-https-redirect.sh *
-bot ALL=(root) NOPASSWD: /bin/bash /opt/bot-metrics/repo/tools/fix-https-redirect.sh
+bot ALL=(root) NOPASSWD: /opt/bot-metrics/repo/tools/fix-https-redirect.sh
+bot ALL=(root) NOPASSWD: /opt/bot-metrics/repo/tools/fix-https-redirect.sh *
