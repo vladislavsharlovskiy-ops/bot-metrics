@@ -11,7 +11,7 @@ from aiogram.types import BotCommand, TelegramObject, Update
 
 from config import ALLOWED_USERS, BOT_TOKEN, OPEN_ACCESS, OWNER_ID
 from db import init_db
-from handlers import business, leads, notifications, payments, reports
+from handlers import admin, business, leads, notifications, payments, reports
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("bot")
@@ -71,6 +71,7 @@ BOT_COMMANDS = [
     BotCommand(command="months",   description="📅 По месяцам (динамика)"),
     BotCommand(command="clients",  description="👥 Топ клиентов по LTV"),
     BotCommand(command="dashboard",description="🌐 Открыть дашборд"),
+    BotCommand(command="admin",    description="🛠 Админ-команды (бэкап, редеплой, …)"),
     BotCommand(command="help",     description="❓ Помощь"),
 ]
 
@@ -85,6 +86,7 @@ async def main() -> None:
     dp.include_router(notifications.router)
     dp.include_router(payments.router)
     dp.include_router(business.router)
+    dp.include_router(admin.router)
     await bot.set_my_commands(BOT_COMMANDS)
     log.info("Bot started")
     asyncio.create_task(notifications.digest_loop(bot))

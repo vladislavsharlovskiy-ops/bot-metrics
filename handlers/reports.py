@@ -8,6 +8,7 @@ from aiogram.types import Message
 from sqlalchemy import func, select
 
 import os
+import re
 
 from db import get_session
 from keyboards import (
@@ -350,12 +351,20 @@ async def cmd_clients(message: Message) -> None:
     await message.answer("\n".join(lines))
 
 
-DASHBOARD_FALLBACK = "https://bot-1777308240-2116-vladislav-sharlovski.bothost.tech"
+DASHBOARD_FALLBACK = "https://dashboard.sharlovsky.pro/"
+
+_IP_URL_RE = re.compile(r"://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}")
 
 
 def _resolve_dashboard_url() -> str:
     url = (os.environ.get("DASHBOARD_URL") or "").strip()
-    if not url or any(p in url for p in ("192.168.", "10.0.", "127.0.0.1", "localhost")):
+    if not url:
+        return DASHBOARD_FALLBACK
+    # Голый IP в URL (любой — внутренний или публичный) — отдаём fallback
+    # с красивым доменом. Покрывает старые .env с http://<IP>/ после миграции.
+    if _IP_URL_RE.search(url):
+        return DASHBOARD_FALLBACK
+    if any(p in url for p in ("localhost", "127.0.0.1")):
         return DASHBOARD_FALLBACK
     return url
 
