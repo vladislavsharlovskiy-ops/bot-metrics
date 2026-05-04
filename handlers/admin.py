@@ -12,17 +12,22 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
+from sqlalchemy import select
 
 from config import OWNER_ID
+from db import get_session
+from models import Payment
 
 log = logging.getLogger("admin")
 router = Router(name="admin")
@@ -259,6 +264,152 @@ async def cmd_deploy_url(message: Message) -> None:
     )
 
 
+# ─── /addpayment ───────────────────────────────────────────────────
+
+@router.message(Command("addpayment"))
+async def cmd_add_payment(message: Message, command: CommandObject) -> None:
+    """
+    Дозаписать платёж вручную (если webhook упал и оплата не дошла до БД).
+    Создаёт Payment с payment_type='unclassified' — потом классифицируется
+    через /fixpay (тот же интерактивный flow, что для платежей-сирот от
+    webhook'а).
+
+    Форматы:
+      1) JSON из письма Prodamus:
+         /addpayment {"date":"…","order_id":"…","sum":"5000.00",…}
+      2) Pipe-separated (минимум amount|name):
+         /addpayment 5000|Бугаева Дарья|+79247330820|email@x.ru|44400242
+    """
+    if not _is_owner(message):
+        return
+    arg = (command.args or "").strip()
+    if not arg:
+        await message.answer(
+            "Использование (один из вариантов):\n\n"
+            "1) JSON из письма Prodamus:\n"
+            "<code>/addpayment {\"sum\":\"5000.00\",\"order_id\":\"44400242\","
+            "\"order_num\":\"Имя Клиента\",\"customer_phone\":\"+79...\","
+            "\"customer_email\":\"x@y.ru\",\"date\":\"2026-05-04T14:13:21+03:00\"}</code>\n\n"
+            "2) Pipe-separated:\n"
+            "<code>/addpayment 5000|Имя Клиента|+79...|x@y.ru|44400242</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    parsed = _parse_payment_arg(arg)
+    if isinstance(parsed, str):
+        await message.answer(f"⚠ {parsed}")
+        return
+
+    with get_session() as session:
+        # Проверяем дубликат по prodamus_id
+        if parsed["prodamus_id"]:
+            existing = session.execute(
+                select(Payment).where(Payment.prodamus_id == parsed["prodamus_id"])
+            ).scalars().first()
+            if existing:
+                await message.answer(
+                    f"⚠ Платёж с prodamus_id={parsed['prodamus_id']} уже есть в БД "
+                    f"(#{existing.id}, {existing.amount:.0f} {existing.currency}). "
+                    f"Если потерян — удали через дашборд, потом /addpayment."
+                )
+                return
+
+        payment = Payment(
+            prodamus_id=parsed["prodamus_id"] or f"manual-{int(datetime.now().timestamp())}",
+            amount=parsed["amount"],
+            currency=parsed["currency"],
+            paid_at=parsed["paid_at"],
+            customer_name=parsed["customer_name"],
+            customer_phone=parsed["customer_phone"],
+            customer_email=parsed["customer_email"],
+            product=parsed.get("product"),
+            payment_type="unclassified",
+            raw_json=json.dumps({"manual": True, "added_via": "/addpayment", "input": arg[:1000]}),
+        )
+        session.add(payment)
+        session.commit()
+        session.refresh(payment)
+        pid = payment.id
+        amount = payment.amount
+        currency = payment.currency
+        name = payment.customer_name or "—"
+
+    await message.answer(
+        f"✅ Платёж <b>#{pid}</b> создан (unclassified)\n"
+        f"💰 {amount:.0f} {currency}\n"
+        f"👤 {name}\n\n"
+        f"Запусти <code>/fixpay</code> — там предложит привязать к лиду "
+        f"или создать нового клиента.",
+        parse_mode="HTML",
+    )
+
+
+def _parse_payment_arg(arg: str) -> dict | str:
+    """
+    Возвращает dict с нормализованными полями платежа или строку с ошибкой.
+    """
+    # Попытка №1: JSON из письма
+    if arg.startswith("{") and arg.endswith("}"):
+        try:
+            data = json.loads(arg)
+            try:
+                from prodamus import extract_payment
+                p = extract_payment(data)
+            except Exception as e:
+                return f"Не удалось распарсить JSON через extract_payment: {e}"
+            return {
+                "prodamus_id": p["prodamus_id"] or None,
+                "amount": p["amount"],
+                "currency": p["currency"],
+                "paid_at": _parse_dt(p["paid_at"]) or datetime.now(),
+                "customer_name": p["customer_name"],
+                "customer_phone": p["customer_phone"],
+                "customer_email": p["customer_email"],
+                "product": p.get("product"),
+            }
+        except json.JSONDecodeError as e:
+            return f"Не валидный JSON: {e}"
+
+    # Попытка №2: pipe-separated
+    parts = [x.strip() for x in arg.split("|")]
+    if len(parts) < 2:
+        return "Нужно как минимум amount|name. См. /addpayment без аргументов для примеров."
+    try:
+        amount = float(parts[0].replace(",", ".").replace(" ", ""))
+    except ValueError:
+        return f"amount должен быть числом, получил: {parts[0]!r}"
+    if amount <= 0:
+        return f"amount должен быть > 0, получил: {amount}"
+    name = parts[1] or None
+    phone = parts[2] if len(parts) > 2 else None
+    email = parts[3] if len(parts) > 3 else None
+    prodamus_id = parts[4] if len(parts) > 4 else None
+    return {
+        "prodamus_id": prodamus_id or None,
+        "amount": amount,
+        "currency": "RUB",
+        "paid_at": datetime.now(),
+        "customer_name": name,
+        "customer_phone": phone or None,
+        "customer_email": email or None,
+        "product": None,
+    }
+
+
+def _parse_dt(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        # Prodamus шлёт ISO с TZ: "2026-05-04T14:13:21+03:00"
+        return datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        try:
+            return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError):
+            return None
+
+
 # ─── /admin (помощь) ───────────────────────────────────────────────
 
 @router.message(Command("admin"))
@@ -272,6 +423,8 @@ async def cmd_admin_help(message: Message) -> None:
         "<code>/setdashboardurl &lt;url&gt;</code> — сменить адрес дашборда\n"
         "<code>/setprodamuskey &lt;key&gt;</code> — задать секретный ключ "
         "Prodamus (если webhook'и валятся с 'bad signature')\n"
+        "<code>/addpayment &lt;…&gt;</code> — дозаписать платёж вручную "
+        "(если webhook потерял оплату). Потом /fixpay для классификации\n"
         "<code>/deployurl</code> — показать URL для GitHub-вебхука "
         "(один раз настроишь — авто-деплой при push в main, /redeploy больше не нужен)",
         parse_mode="HTML",
