@@ -140,11 +140,30 @@ systemctl restart bot-metrics-bot bot-metrics-web bot-metrics-deploy
 
 # ------------------------------------------------------------------
 # nginx — прокси на 127.0.0.1:8765 (дашборд) + /__deploy на 9876
+# Дашборд закрыт basic auth (см. блок ниже).
 # ------------------------------------------------------------------
-echo "==> nginx"
+echo "==> nginx config"
 install -m 0644 "$REPO_DIR/deploy/nginx-bot-metrics.conf" /etc/nginx/sites-available/bot-metrics.conf
 ln -sf /etc/nginx/sites-available/bot-metrics.conf /etc/nginx/sites-enabled/bot-metrics.conf
 rm -f /etc/nginx/sites-enabled/default
+
+# ------------------------------------------------------------------
+# Basic auth для дашборда. Создаём htpasswd-файл ДО `nginx -t`,
+# иначе тест конфига упадёт (auth_basic_user_file ссылается на файл).
+# Пароль показываем в финальном баннере, повторно не печатаем.
+# ------------------------------------------------------------------
+echo "==> basic auth для дашборда"
+apt-get install -y apache2-utils
+DASHBOARD_USER="admin"
+if [[ ! -f /etc/nginx/.htpasswd_bot_metrics ]]; then
+  DASHBOARD_PASSWORD="$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 20)"
+  htpasswd -bc /etc/nginx/.htpasswd_bot_metrics "$DASHBOARD_USER" "$DASHBOARD_PASSWORD" >/dev/null
+  chmod 640 /etc/nginx/.htpasswd_bot_metrics
+  chown root:www-data /etc/nginx/.htpasswd_bot_metrics
+else
+  DASHBOARD_PASSWORD=""  # уже был — не перезаписываем, не печатаем
+fi
+
 nginx -t
 systemctl restart nginx
 
@@ -172,6 +191,14 @@ echo "  Авто-деплой: http://$(curl -s -4 ifconfig.me 2>/dev/null || ho
 echo
 echo "  Добавь этот URL в GitHub: Settings → Webhooks → Add webhook"
 echo "  Content type: application/json. Event: Just the push event."
+if [[ -n "${DASHBOARD_PASSWORD:-}" ]]; then
+  echo
+  echo "  Дашборд закрыт basic auth:"
+  echo "    Логин:  $DASHBOARD_USER"
+  echo "    Пароль: $DASHBOARD_PASSWORD"
+  echo "    ⚠ Сохрани пароль! Повторно я его не покажу."
+  echo "    Сменить позже: sudo bash $REPO_DIR/tools/secure-dashboard.sh"
+fi
 echo
 echo "  Логи:          journalctl -u bot-metrics-bot -f"
 echo "  Перезапуск:    systemctl restart bot-metrics-bot"
