@@ -37,13 +37,19 @@ htpasswd -bc "$HTPASSWD" "$USERNAME" "$PASSWORD" >/dev/null
 chmod 640 "$HTPASSWD"
 chown root:www-data "$HTPASSWD"
 
-# Применяем nginx-конфиг из репы (он с auth_basic)
-NGINX_SRC=/opt/bot-metrics/repo/deploy/nginx-bot-metrics.conf
+# nginx читает htpasswd на каждый запрос — reload не нужен, если конфиг
+# уже содержит auth_basic. Но если сервер ещё на старом конфиге без auth
+# (например, апгрейд со старого install.sh) — тогда ставим конфиг из репы.
+#
+# ВАЖНО: НЕ переустанавливаем конфиг, если auth_basic уже есть, чтобы
+# не затереть SSL-блок, который добавил certbot после установки.
 NGINX_DST=/etc/nginx/sites-available/bot-metrics.conf
-install -m 0644 "$NGINX_SRC" "$NGINX_DST"
-
-nginx -t
-systemctl reload nginx
+if ! grep -q "auth_basic" "$NGINX_DST" 2>/dev/null; then
+    echo "==> nginx конфиг ещё без basic auth — ставлю из репы"
+    install -m 0644 /opt/bot-metrics/repo/deploy/nginx-bot-metrics.conf "$NGINX_DST"
+    nginx -t
+    systemctl reload nginx
+fi
 
 echo
 echo "═══════════════════════════════════════════════════════════════"
