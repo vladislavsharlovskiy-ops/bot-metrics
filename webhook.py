@@ -131,6 +131,15 @@ def prodamus_webhook():
 
     if not verify(nested, provided_sig):
         log.warning("Signature mismatch for order_id=%s", form.get("order_id"))
+        # Чтобы оплата не потерялась тихо — шлём владельцу уведомление со всеми
+        # полями платежа. Дальше он либо поправит PRODAMUS_SECRET_KEY (через
+        # /setprodamuskey в боте), либо дозапишет вручную (/addpayment).
+        # Возвращаем 403, чтобы Prodamus продолжал ретраить — после починки
+        # ключа повторный запрос пройдёт нормально.
+        try:
+            _notify_owner_bad_signature(nested, form)
+        except Exception as e:
+            log.warning("Failed to notify owner about bad signature: %s", e)
         return jsonify({"error": "bad signature"}), 403
 
     p = extract_payment(nested)
@@ -219,6 +228,48 @@ def _payment_header(p: Payment) -> str:
     if p.paid_at:
         lines.append(f"🕒 {p.paid_at:%d.%m.%Y %H:%M}")
     return "\n".join(lines)
+
+
+def _notify_owner_bad_signature(nested: dict, raw_form: dict) -> None:
+    """
+    Webhook от Prodamus пришёл, но signature не сошлась → платёж в БД НЕ
+    записан, в дашборд НЕ попал. Чтобы оплата не потерялась — отдаём
+    владельцу карточку со всеми данными, которые нашли в payload, и
+    подсказку что делать.
+    """
+    p = extract_payment(nested)
+    name = p.get("customer_name") or "—"
+    phone = p.get("customer_phone") or "—"
+    email = p.get("customer_email") or "—"
+    amount = p.get("amount") or 0
+    currency = p.get("currency") or "RUB"
+    order_id = p.get("prodamus_id") or raw_form.get("order_id") or "—"
+    product = p.get("product") or "—"
+
+    # JSON-блок, готовый к копированию в /addpayment (если оплата реальная,
+    # но signature пока не проходит — пользователь дозапишет одной командой).
+    addpayment_arg = json.dumps(nested, ensure_ascii=False)
+    # Telegram не любит >4096 символов в одном сообщении — обрезаем.
+    if len(addpayment_arg) > 3500:
+        addpayment_arg = addpayment_arg[:3500] + "…"
+
+    text = (
+        "⚠ <b>Webhook от Prodamus с неверной подписью</b>\n\n"
+        f"💰 <b>{amount:.0f} {currency}</b>\n"
+        f"👤 {name}\n"
+        f"📧 {email}\n"
+        f"📱 {phone}\n"
+        f"🛍 {product}\n"
+        f"🆔 order_id: <code>{order_id}</code>\n\n"
+        "Оплата <b>НЕ записана в БД</b>. Возможные причины:\n"
+        "• PRODAMUS_SECRET_KEY в .env пустой/неправильный — "
+        "поправь через <code>/setprodamuskey &lt;key&gt;</code>\n"
+        "• Запрос не от Prodamus (попытка взлома)\n\n"
+        "Если оплата реальная — дозапиши вручную:\n"
+        f"<code>/addpayment {addpayment_arg}</code>\n\n"
+        "Дальше /fixpay для классификации (привязать к лиду / создать клиента)."
+    )
+    tg_send(text)
 
 
 def _notify_auto_repeat(payment: Payment, client: Client) -> None:
