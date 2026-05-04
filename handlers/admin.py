@@ -558,12 +558,10 @@ async def cmd_diag(message: Message) -> None:
     except Exception as e:
         lines.append(f"🔑 sudo -ln: ⚠ {e}")
 
-    # 4. Сертификат
-    cert_path = "/etc/letsencrypt/live/dashboard.sharlovsky.pro/fullchain.pem"
-    if os.path.exists(cert_path):
-        lines.append("\n🔒 cert: ✅ есть")
-    else:
-        lines.append("\n🔒 cert: ❌ нет")
+    # 4. Сертификат — проверяем через curl https (см. шаг 7), а не путь
+    #    /etc/letsencrypt/live/, потому что папка owned by root 0700, бот
+    #    физически не может её прочитать. False-negative «нет» вводил в
+    #    заблуждение, хотя cert на самом деле был.
 
     # 5. fix-https-redirect.sh — есть и исполняемый?
     fixscript = FIX_HTTPS_SCRIPT
