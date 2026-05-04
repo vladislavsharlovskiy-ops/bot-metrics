@@ -1,0 +1,67 @@
+name: Auto-deploy on push to main
+
+# Каждый push в main триггерит деплой на сервер. На сервере крутится
+# deploy_listener.py, который слушает /__deploy/<SECRET>, под капотом
+# дёргает /opt/bot-metrics/bin/deploy.sh (git pull + restart).
+#
+# ОДНОРАЗОВАЯ НАСТРОЙКА (после первого редеплоя бота):
+#   1. В Telegram-боте → /deployurl — там бот напечатает полный URL вида
+#      https://dashboard.sharlovsky.pro/__deploy/<SECRET>
+#   2. На GitHub: https://github.com/vladislavsharlovskiy-ops/bot-metrics/settings/secrets/actions
+#      → New repository secret
+#      → Name:  DEPLOY_URL
+#      → Value: <вставить URL из шага 1 целиком>
+#   3. Готово — все следующие PR-мержи будут авто-деплоиться без /redeploy.
+#
+# Если секрет DEPLOY_URL не задан — workflow дружелюбно пропускает шаг и
+# не падает, чтобы первый запуск (до настройки) не светился красным.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:  # позволяет запустить руками из вкладки Actions
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger deploy webhook
+        env:
+          DEPLOY_URL: ${{ secrets.DEPLOY_URL }}
+        run: |
+          if [ -z "${DEPLOY_URL}" ]; then
+            echo "::warning::DEPLOY_URL не задан в Settings → Secrets → Actions."
+            echo "::warning::Авто-деплой пропущен. См. README в этом workflow."
+            exit 0
+          fi
+
+          # Пытаемся 3 раза с экспоненциальным бэкоффом (2с, 4с, 8с) на случай
+          # короткой сетевой ошибки или рестарта сервиса.
+          for attempt in 1 2 3; do
+            echo "→ Попытка $attempt: POST на deploy webhook…"
+            http_code=$(curl -sS -o /tmp/deploy.out -w '%{http_code}' \
+              --max-time 300 \
+              -X POST \
+              -H 'Content-Type: application/json' \
+              -d '{"github_actions": true}' \
+              "${DEPLOY_URL}" || echo "000")
+            cat /tmp/deploy.out || true
+            echo
+
+            if [ "$http_code" = "200" ]; then
+              echo "✅ Деплой успешен (HTTP $http_code)"
+              exit 0
+            fi
+
+            echo "::warning::Попытка $attempt: HTTP $http_code"
+            if [ "$attempt" -lt 3 ]; then
+              sleep $((2 ** attempt))
+            fi
+          done
+
+          echo "::error::Деплой не удался после 3 попыток"
+          exit 1

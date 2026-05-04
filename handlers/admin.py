@@ -248,18 +248,22 @@ async def cmd_deploy_url(message: Message) -> None:
     url = f"{base}/__deploy/{secret}"
 
     await message.answer(
-        "🪝 <b>GitHub Webhook URL для авто-деплоя</b>\n\n"
-        f"<code>{url}</code>\n\n"
-        "Куда вставить:\n"
+        "🪝 <b>Авто-деплой при push в main</b>\n\n"
+        f"URL: <code>{url}</code>\n\n"
+        "<b>Способ A — GitHub Actions (рекомендую)</b>\n"
+        "1. https://github.com/vladislavsharlovskiy-ops/bot-metrics/settings/secrets/actions\n"
+        "2. <b>New repository secret</b>\n"
+        "3. Name: <code>DEPLOY_URL</code>\n"
+        "4. Value: вставить URL целиком (со скобками <code>https://…/__deploy/…</code>)\n"
+        "5. Готово — workflow <code>.github/workflows/deploy.yml</code> сам "
+        "будет дёргать его на каждом push в main.\n\n"
+        "<b>Способ B — GitHub Webhook (альтернатива)</b>\n"
         "1. https://github.com/vladislavsharlovskiy-ops/bot-metrics/settings/hooks\n"
         "2. <b>Add webhook</b>\n"
-        "3. <b>Payload URL</b> — вставь URL выше\n"
-        "4. <b>Content type</b> — application/json\n"
-        "5. <b>Which events</b> — Just the push event\n"
-        "6. <b>Active</b> — галочка\n"
-        "7. Add webhook\n\n"
-        "После этого каждый push в main → авто-деплой на сервер. "
-        "Тебе больше не надо ни /redeploy, ни SSH.",
+        "3. Payload URL: вставить URL\n"
+        "4. Content type: <code>application/json</code>\n"
+        "5. Events: Just the push event → <b>Add webhook</b>\n\n"
+        "Любой из способов — после настройки <code>/redeploy</code> больше не нужен.",
         parse_mode="HTML",
     )
 
