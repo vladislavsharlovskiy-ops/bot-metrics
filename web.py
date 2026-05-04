@@ -607,6 +607,16 @@ def _try_sheets_sync(lead_id: int) -> None:
         log.warning("sheets sync skipped: %s", e)
 
 
+# Регистрация Prodamus webhook'а сразу здесь, чтобы он работал и при
+# запуске через `python web.py`, и через `gunicorn web:app`. Раньше
+# регистрация была только в main.py, который TimeWeb не использует
+# (там systemd запускает напрямую gunicorn web:app), и из-за этого
+# /webhook/prodamus отвечал 404 и оплаты теряли путь до БД.
+from webhook import bp as _webhook_bp  # noqa: E402  — после определения app
+if "webhook" not in app.blueprints:
+    app.register_blueprint(_webhook_bp)
+
+
 if __name__ == "__main__":
     # 0.0.0.0 — доступ с телефона в той же Wi-Fi сети по IP Mac.
     app.run(host="0.0.0.0", port=8765, debug=False)
