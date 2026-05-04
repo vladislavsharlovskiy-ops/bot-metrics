@@ -176,10 +176,10 @@ ufw allow 80/tcp  || true
 ufw --force enable || true
 
 # ------------------------------------------------------------------
-# cron — ежедневный бэкап
+# cron — еженедельный бэкап (понедельник 03:00 МСК)
 # ------------------------------------------------------------------
 echo "==> cron для бэкапа"
-CRON_LINE="0 3 * * * $BIN_DIR/backup.sh >> $LOG_DIR/backup.log 2>&1"
+CRON_LINE="0 3 * * 1 $BIN_DIR/backup.sh >> $LOG_DIR/backup.log 2>&1"
 ( crontab -u "$SERVICE_USER" -l 2>/dev/null | grep -v "$BIN_DIR/backup.sh" ; echo "$CRON_LINE" ) | crontab -u "$SERVICE_USER" -
 
 echo

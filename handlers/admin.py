@@ -166,6 +166,62 @@ def _persist_env(path: Path, key: str, value: str) -> bool | str:
         return str(e)
 
 
+# ─── /setprodamuskey ───────────────────────────────────────────────
+
+@router.message(Command("setprodamuskey"))
+async def cmd_set_prodamus_key(message: Message, command: CommandObject) -> None:
+    """
+    Меняет PRODAMUS_SECRET_KEY в .env и перезапускает web-сервис.
+    После этого webhook'и от Prodamus снова валидируются успешно.
+    """
+    if not _is_owner(message):
+        return
+    arg = (command.args or "").strip()
+    if not arg or len(arg) < 10:
+        await message.answer(
+            "Использование: <code>/setprodamuskey твой_secret_key</code>\n\n"
+            "Где взять: panel.prodamus.ru → Настройки → "
+            "Защита от поддельных уведомлений → secret key.\n\n"
+            "⚠ После выполнения сообщение лучше удали — ключ виден в истории чата.",
+            parse_mode="HTML",
+        )
+        return
+
+    # 1) В .env — без этого web-процесс не подхватит, т.к. PRODAMUS_SECRET
+    #    читается на старте модуля prodamus.py
+    persisted = _persist_env(ENV_FILE, "PRODAMUS_SECRET_KEY", arg)
+    if persisted is not True:
+        await message.answer(f"⚠ Не удалось записать в .env: {persisted}")
+        return
+
+    # 2) Перезапуск web-сервиса (бот сам себя НЕ перезапускаем — это другой
+    #    юнит). systemctl restart bot-metrics-web разрешён через sudoers.
+    await message.answer(
+        "🔄 Ключ записан. Перезапускаю web-сервис, чтобы Flask его подхватил…"
+    )
+    try:
+        result = subprocess.run(
+            ["sudo", "/bin/systemctl", "restart", "bot-metrics-web"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            await message.answer(
+                "✅ Готово. Webhook на /webhook/prodamus теперь будет принимать "
+                "платежи. Попроси Prodamus прислать тестовый или дождись следующей "
+                "оплаты.\n\n"
+                "Если оплата уже была и потерялась — её можно вручную добавить, "
+                "но в БД она вернётся только при повторном webhook'е.\n\n"
+                "⚠ Удали сообщение с ключом из чата."
+            )
+        else:
+            await message.answer(
+                f"⚠ Restart не удался:\n<pre>{result.stderr[:1000]}</pre>",
+                parse_mode="HTML",
+            )
+    except Exception as e:
+        await message.answer(f"⚠ Ошибка: {e}")
+
+
 # ─── /deployurl ────────────────────────────────────────────────────
 
 @router.message(Command("deployurl"))
@@ -214,6 +270,8 @@ async def cmd_admin_help(message: Message) -> None:
         "<code>/backup</code> — бэкап БД прямо сейчас, файл придёт в этот чат\n"
         "<code>/redeploy</code> — подтянуть свежий код с GitHub и перезапустить\n"
         "<code>/setdashboardurl &lt;url&gt;</code> — сменить адрес дашборда\n"
+        "<code>/setprodamuskey &lt;key&gt;</code> — задать секретный ключ "
+        "Prodamus (если webhook'и валятся с 'bad signature')\n"
         "<code>/deployurl</code> — показать URL для GitHub-вебхука "
         "(один раз настроишь — авто-деплой при push в main, /redeploy больше не нужен)",
         parse_mode="HTML",

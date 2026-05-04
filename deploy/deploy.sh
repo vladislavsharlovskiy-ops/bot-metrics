@@ -18,6 +18,14 @@ sudo -u "$SERVICE_USER" git reset --hard origin/main
 # Зависимости — переустанавливаем тихо, чтобы захватить новые
 sudo -u "$SERVICE_USER" "$VENV_DIR/bin/pip" install --quiet -r "$REPO_DIR/requirements.txt"
 
+# Cron-расписание бэкапа (понедельник 03:00 МСК) — переустанавливаем на каждом
+# деплое, чтоб смена расписания в репе автоматом докатилась до сервера, без
+# ручного crontab -e на сервере.
+BIN_DIR="$ROOT_DIR/bin"
+LOG_DIR="$ROOT_DIR/logs"
+CRON_LINE="0 3 * * 1 $BIN_DIR/backup.sh >> $LOG_DIR/backup.log 2>&1"
+( sudo -u "$SERVICE_USER" crontab -l 2>/dev/null | grep -v "$BIN_DIR/backup.sh" ; echo "$CRON_LINE" ) | sudo -u "$SERVICE_USER" crontab -
+
 echo "[deploy] restarting services"
 systemctl restart bot-metrics-bot bot-metrics-web
 
