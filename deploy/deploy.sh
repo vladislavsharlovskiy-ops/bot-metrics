@@ -26,6 +26,12 @@ LOG_DIR="$ROOT_DIR/logs"
 CRON_LINE="0 3 * * 1 $BIN_DIR/backup.sh >> $LOG_DIR/backup.log 2>&1"
 ( sudo -u "$SERVICE_USER" crontab -l 2>/dev/null | grep -v "$BIN_DIR/backup.sh" ; echo "$CRON_LINE" ) | sudo -u "$SERVICE_USER" crontab -
 
+# Sudoers для service-юзера — обновляем на каждом деплое, чтобы новые
+# разрешения (например, fix-https-redirect.sh) автоматом докатывались на
+# сервер без ручного visudo.
+install -m 0440 "$REPO_DIR/deploy/sudoers.d-bot-metrics" /etc/sudoers.d/bot-metrics
+visudo -cf /etc/sudoers.d/bot-metrics >/dev/null
+
 echo "[deploy] restarting services"
 systemctl restart bot-metrics-bot bot-metrics-web
 
