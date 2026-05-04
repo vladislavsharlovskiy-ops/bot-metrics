@@ -576,6 +576,36 @@ async def cmd_diag(message: Message) -> None:
     else:
         lines.append(f"🛠 fix-https-redirect.sh: ❌ нет ({fixscript})")
 
+    # 6. Содержимое nginx-конфига — критично, чтобы понять что там реально
+    nginx_conf = "/etc/nginx/sites-available/bot-metrics.conf"
+    try:
+        with open(nginx_conf) as f:
+            content = f.read()
+        # Telegram-friendly: показываем первые ~1500 символов
+        snippet = content[:1500]
+        if len(content) > 1500:
+            snippet += f"\n…(+{len(content)-1500} chars)"
+        lines.append(f"\n📄 <b>{nginx_conf}</b>:\n<pre>{snippet}</pre>")
+    except Exception as e:
+        lines.append(f"\n📄 nginx-конфиг: ⚠ {e}")
+
+    # 7. Что отвечает nginx на HTTP и HTTPS — критично для диагностики
+    #    Используем Host: header, чтобы попасть на правильный server-блок.
+    for proto, port in [("http", 80), ("https", 443)]:
+        try:
+            r = subprocess.run(
+                [
+                    "curl", "-sI", "-k", "--max-time", "5",
+                    "-H", "Host: dashboard.sharlovsky.pro",
+                    f"{proto}://127.0.0.1:{port}/",
+                ],
+                capture_output=True, text=True, timeout=10,
+            )
+            head = r.stdout[:500] if r.stdout else f"(stderr: {r.stderr[:300]})"
+            lines.append(f"\n🌐 <b>curl {proto}://localhost</b>:\n<pre>{head}</pre>")
+        except Exception as e:
+            lines.append(f"\n🌐 curl {proto} failed: {e}")
+
     # Telegram message limit ~4096 — собираем
     text = "\n".join(lines)[:4000]
     await message.answer(text, parse_mode="HTML")
