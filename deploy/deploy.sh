@@ -21,13 +21,28 @@ warn() { echo "[deploy] $(date '+%H:%M:%S') WARN: $*" >&2; }
 
 step "starting"
 
-# 1. Git pull
+# 0. Git pull — раньше других шагов, чтобы repo/deploy.sh обновился, и
+#    self-update ниже мог бы переключиться на свежую версию.
 cd "$REPO_DIR" || { warn "cd $REPO_DIR failed"; }
 sudo -u "$SERVICE_USER" git fetch --quiet origin main || warn "git fetch failed"
 sudo -u "$SERVICE_USER" git reset --hard origin/main || warn "git reset failed"
 step "git pulled to $(sudo -u "$SERVICE_USER" git -C "$REPO_DIR" log -1 --format='%h %s' 2>/dev/null || echo '?')"
 
-# 2. Python deps
+# 0.1. SELF-UPDATE: если repo/deploy/deploy.sh отличается от текущего ($0),
+#      перезаписываем себя и re-exec'имся. Без этого фикстауризменения
+#      в самом deploy.sh не доезжают до bin/ при auto-deploy (только
+#      через admin.py /redeploy с self-sync). Теперь — даже автосинхрон.
+SELF_UPDATE_SRC="$REPO_DIR/deploy/deploy.sh"
+if [[ -f "$SELF_UPDATE_SRC" ]] && [[ "$0" != "$SELF_UPDATE_SRC" ]] \
+        && ! cmp -s "$SELF_UPDATE_SRC" "$0" 2>/dev/null; then
+    step "self-update: $SELF_UPDATE_SRC newer than $0"
+    cp "$SELF_UPDATE_SRC" "$0" && chmod +x "$0" \
+        || warn "self-update copy failed"
+    # exec заменяет процесс на свежий deploy.sh (с теми же args)
+    exec "$0" "$@"
+fi
+
+# 1. Python deps
 sudo -u "$SERVICE_USER" "$VENV_DIR/bin/pip" install --quiet \
     -r "$REPO_DIR/requirements.txt" || warn "pip install failed"
 
