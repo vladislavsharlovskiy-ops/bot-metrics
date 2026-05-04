@@ -88,6 +88,14 @@ if [[ ! -f "$ENV_FILE" ]]; then
   ask OWNER_ID           "Твой Telegram OWNER_ID (число)"
   ask EXTRA_USER_IDS     "Дополнительные user_ids через запятую (Enter — пропустить)" ""
   ask LEADS_API_KEY      "LEADS_API_KEY для /api/external/leads (Enter — отключить)" ""
+  ask PRODAMUS_SECRET_KEY "PRODAMUS_SECRET_KEY для проверки платёжных webhook (Enter — пропустить)" "" silent
+  ask WEBHOOK_SITE_UUID  "WEBHOOK_SITE_UUID (для тестового webhook.site, Enter — пропустить)" ""
+  ask SHEETS_WEBHOOK_URL "SHEETS_WEBHOOK_URL (Apps Script URL для синка с Google Sheets, Enter — пропустить)" ""
+  ask SHEET_URL          "SHEET_URL (ссылка на саму таблицу для команды /sheet, Enter — пропустить)" ""
+
+  # DASHBOARD_URL — публичный адрес дашборда. По умолчанию http://<публичный IP>/.
+  PUBLIC_IP="$(curl -s -4 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')"
+  echo "DASHBOARD_URL=http://$PUBLIC_IP/" >> "$ENV_FILE"
 
   # Секрет для GitHub-вебхука авто-деплоя
   DEPLOY_SECRET="$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 32)"
