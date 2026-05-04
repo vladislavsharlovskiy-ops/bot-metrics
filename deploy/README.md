@@ -73,11 +73,14 @@ Cron каждый день в 3:00 МСК запускает `bin/backup.sh`, к
 ## Перенос базы со старого сервера (BotHost)
 
 1. На BotHost скачай `bot.db` (через панель или `cat /app/data/bot.db | base64`).
-2. На новом сервере замени файл:
+2. С локальной машины загрузи файл на новый сервер:
    ```bash
-   systemctl stop bot-metrics-bot bot-metrics-web
-   mv /opt/bot-metrics/data/bot.db /opt/bot-metrics/data/bot.db.fresh
-   # положи сюда старый bot.db (через scp / nano + base64 -d)
-   chown bot:bot /opt/bot-metrics/data/bot.db
-   systemctl start bot-metrics-bot bot-metrics-web
+   scp ~/Downloads/bot.db root@<IP>:/opt/bot-metrics/data/bot.db.imported
    ```
+3. На сервере запусти импорт:
+   ```bash
+   sudo /opt/bot-metrics/bin/import_db.sh
+   ```
+   Скрипт проверит SQLite-файл, остановит сервисы, сохранит текущую базу в
+   `data/backups/bot-before-import-<TS>.db`, поставит загруженную на место и
+   запустит сервисы обратно.

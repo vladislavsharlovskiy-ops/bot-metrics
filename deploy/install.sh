@@ -120,6 +120,8 @@ install -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0755 \
 install -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0755 \
   "$REPO_DIR/deploy/backup.sh"          "$BIN_DIR/backup.sh"
 install -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0755 \
+  "$REPO_DIR/deploy/import_db.sh"       "$BIN_DIR/import_db.sh"
+install -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0755 \
   "$REPO_DIR/deploy/deploy_listener.py" "$BIN_DIR/deploy_listener.py"
 
 # ------------------------------------------------------------------
