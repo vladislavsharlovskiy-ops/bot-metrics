@@ -251,7 +251,10 @@ def _month_metrics(year: int, month: int) -> dict:
             .where(Payment.payment_type == "repeat")
         ).scalar_one()
     leads = counts.get(LEAD_NEW, 0)
-    paid = counts.get(PAID, 0) + counts.get(CONSULTED, 0) + counts.get(PACKAGE_BOUGHT, 0)
+    # После PR #28 _counts_in_period возвращает «лид достиг этапа X ИЛИ дальше».
+    # Поэтому counts.get(PAID) уже включает CONSULTED и PACKAGE_BOUGHT — НЕ надо
+    # их складывать ещё раз (раньше так делали и получали x2-x3 переучёт).
+    paid = counts.get(PAID, 0)
     return {
         "year": year,
         "month": month,
