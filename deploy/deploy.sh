@@ -53,7 +53,35 @@ else
     warn "sudoers source not found in repo"
 fi
 
-# 5. Restart — ВСЕГДА в конце, даже если выше что-то упало. Без рестарта
+# 5. Nginx-config — синхронизируем из репы (там, например, появился
+#    location /webhook/ для платёжных webhook'ов). Если cert уже есть,
+#    после переустановки конфига certbot install --redirect возвращает
+#    ssl-блок и редирект http→https.
+NGINX_SRC="$REPO_DIR/deploy/nginx-bot-metrics.conf"
+NGINX_DST="/etc/nginx/sites-available/bot-metrics.conf"
+DOMAIN="dashboard.sharlovsky.pro"
+if [[ -f "$NGINX_SRC" ]]; then
+    install -m 0644 "$NGINX_SRC" "$NGINX_DST" || warn "nginx install failed"
+    if [[ -d "/etc/letsencrypt/live/$DOMAIN" ]] && command -v certbot >/dev/null 2>&1; then
+        certbot install --cert-name "$DOMAIN" --installer nginx --redirect \
+            --non-interactive >/dev/null 2>&1 || warn "certbot install failed"
+        # HSTS — добавляем если ещё нет
+        if ! grep -q "Strict-Transport-Security" "$NGINX_DST"; then
+            sed -i -E '0,/ssl_certificate_key/{/ssl_certificate_key/a\    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+}' "$NGINX_DST" || warn "HSTS sed failed"
+        fi
+    fi
+    if nginx -t >/dev/null 2>&1; then
+        systemctl reload nginx || warn "nginx reload failed"
+        step "nginx config synced + reloaded"
+    else
+        warn "nginx -t failed, NOT reloading (текущий конфиг работает)"
+    fi
+else
+    warn "nginx config source not found in repo"
+fi
+
+# 6. Restart — ВСЕГДА в конце, даже если выше что-то упало. Без рестарта
 #    бот остаётся на старом коде, и пользователь не видит фиксов.
 step "restarting services"
 systemctl restart bot-metrics-bot bot-metrics-web || warn "service restart failed"
