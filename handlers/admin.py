@@ -99,9 +99,11 @@ async def cmd_redeploy(message: Message) -> None:
     # (sudoers re-install, cron update, и т.п.) не подхватываются — старая
     # копия в bin/ исполняется как и при первой установке.
     # Каталог bin/ owned by bot:bot, права на запись есть.
-    _sync_bin_from_repo()
+    synced = _sync_bin_from_repo()
+    sync_msg = f"📦 Sync bin: {', '.join(synced) if synced else '(nothing copied)'}"
 
     await message.answer(
+        f"{sync_msg}\n\n"
         "🚀 Подтягиваю свежий код и перезапускаю сервисы.\n"
         "Бот сейчас уйдёт на 10-20 секунд, после этого пиши /help для проверки."
     )
@@ -464,10 +466,20 @@ async def cmd_force_https(message: Message) -> None:
             f"⚠ Не найден {FIX_HTTPS_SCRIPT} — сделай /redeploy сначала."
         )
         return
+    # Убедимся, что скрипт исполняемый (после git checkout exec-bit мог
+    # потеряться, если коммитили без него)
+    try:
+        os.chmod(FIX_HTTPS_SCRIPT, 0o755)
+    except Exception:
+        pass
     await message.answer("🔄 Включаю http→https редирект и HSTS…")
     try:
+        # Запускаем скрипт напрямую (по shebang #!/usr/bin/env bash) — без
+        # явного /bin/bash, чтобы sudoers-entry не зависел от пути bash'а
+        # (Ubuntu 24.04+ симлинкует /bin/bash → /usr/bin/bash, и sudo
+        # канонизирует путь — старая entry с /bin/bash не матчится).
         result = subprocess.run(
-            ["sudo", "/bin/bash", FIX_HTTPS_SCRIPT],
+            ["sudo", FIX_HTTPS_SCRIPT],
             capture_output=True, text=True, timeout=120,
         )
         tail = (result.stdout + result.stderr)[-1500:]
@@ -492,6 +504,83 @@ async def cmd_force_https(message: Message) -> None:
         await message.answer(f"⚠ Ошибка: {e}")
 
 
+# ─── /diag ─────────────────────────────────────────────────────────
+
+@router.message(Command("diag"))
+async def cmd_diag(message: Message) -> None:
+    """
+    Диагностика состояния сервера: версии bin-скриптов, sudo permissions,
+    наличие сертификата, базовая инфа о nginx-конфиге.
+    Только для ловли багов, ничего не меняет.
+    """
+    if not _is_owner(message):
+        return
+
+    lines: list[str] = ["🔍 <b>Диагностика</b>\n"]
+
+    # 1. Версия admin.py — берём commit hash из .git
+    try:
+        commit = subprocess.run(
+            ["git", "-C", "/opt/bot-metrics/repo", "log", "-1", "--pretty=%h %s"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+        lines.append(f"📍 repo HEAD: <code>{commit}</code>")
+    except Exception as e:
+        lines.append(f"📍 repo HEAD: ⚠ {e}")
+
+    # 2. Хеши deploy.sh — bin/ vs repo/, чтоб увидеть, синканулись или нет
+    import hashlib
+    def _md5(path: str) -> str:
+        try:
+            with open(path, "rb") as f:
+                return hashlib.md5(f.read()).hexdigest()[:8]
+        except Exception:
+            return "—"
+    bin_md5 = _md5("/opt/bot-metrics/bin/deploy.sh")
+    repo_md5 = _md5("/opt/bot-metrics/repo/deploy/deploy.sh")
+    same = "✅ совпадают" if bin_md5 == repo_md5 and bin_md5 != "—" else "❌ РАЗНЫЕ"
+    lines.append(f"📦 deploy.sh md5: bin=<code>{bin_md5}</code> repo=<code>{repo_md5}</code> {same}")
+
+    # 3. sudo -ln (показывает что bot может через sudo без пароля)
+    try:
+        sudo_l = subprocess.run(
+            ["sudo", "-ln"], capture_output=True, text=True, timeout=5,
+        ).stdout
+        # отфильтруем чтобы было читаемо
+        sudo_lines = [l.strip() for l in sudo_l.splitlines()
+                      if "NOPASSWD" in l or "ALL =" in l]
+        if sudo_lines:
+            lines.append("\n🔑 <b>sudo permissions (от bot):</b>")
+            for l in sudo_lines:
+                lines.append(f"  <code>{l}</code>")
+        else:
+            lines.append("🔑 sudo permissions: пусто или не получилось прочитать")
+    except Exception as e:
+        lines.append(f"🔑 sudo -ln: ⚠ {e}")
+
+    # 4. Сертификат
+    cert_path = "/etc/letsencrypt/live/dashboard.sharlovsky.pro/fullchain.pem"
+    if os.path.exists(cert_path):
+        lines.append("\n🔒 cert: ✅ есть")
+    else:
+        lines.append("\n🔒 cert: ❌ нет")
+
+    # 5. fix-https-redirect.sh — есть и исполняемый?
+    fixscript = FIX_HTTPS_SCRIPT
+    if os.path.exists(fixscript):
+        executable = os.access(fixscript, os.X_OK)
+        lines.append(
+            f"🛠 fix-https-redirect.sh: ✅ есть, "
+            f"{'исполняемый ✅' if executable else 'НЕ исполняемый ❌'}"
+        )
+    else:
+        lines.append(f"🛠 fix-https-redirect.sh: ❌ нет ({fixscript})")
+
+    # Telegram message limit ~4096 — собираем
+    text = "\n".join(lines)[:4000]
+    await message.answer(text, parse_mode="HTML")
+
+
 # ─── /admin (помощь) ───────────────────────────────────────────────
 
 @router.message(Command("admin"))
@@ -509,6 +598,8 @@ async def cmd_admin_help(message: Message) -> None:
         "(если webhook потерял оплату). Потом /fixpay для классификации\n"
         "<code>/forcehttps</code> — принудительно включить http→https редирект "
         "и HSTS (если в браузере «Не защищено» с валидным сертификатом)\n"
+        "<code>/diag</code> — диагностика состояния сервера "
+        "(версии скриптов, sudo permissions, сертификаты)\n"
         "<code>/deployurl</code> — показать URL для GitHub-вебхука "
         "(один раз настроишь — авто-деплой при push в main, /redeploy больше не нужен)",
         parse_mode="HTML",
