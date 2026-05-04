@@ -410,6 +410,53 @@ def _parse_dt(value: str | None) -> datetime | None:
             return None
 
 
+# ─── /forcehttps ───────────────────────────────────────────────────
+
+FIX_HTTPS_SCRIPT = "/opt/bot-metrics/repo/tools/fix-https-redirect.sh"
+
+
+@router.message(Command("forcehttps"))
+async def cmd_force_https(message: Message) -> None:
+    """
+    Принудительно включает редирект http→https и HSTS для дашборд-домена.
+    Лечит ситуацию, когда certbot не дописал redirect (на повторных запусках
+    или после того, как secure-dashboard.sh затёр SSL-конфиг).
+    """
+    if not _is_owner(message):
+        return
+    if not os.path.exists(FIX_HTTPS_SCRIPT):
+        await message.answer(
+            f"⚠ Не найден {FIX_HTTPS_SCRIPT} — сделай /redeploy сначала."
+        )
+        return
+    await message.answer("🔄 Включаю http→https редирект и HSTS…")
+    try:
+        result = subprocess.run(
+            ["sudo", "/bin/bash", FIX_HTTPS_SCRIPT],
+            capture_output=True, text=True, timeout=120,
+        )
+        tail = (result.stdout + result.stderr)[-1500:]
+        if result.returncode == 0:
+            await message.answer(
+                "✅ Готово.\n\n"
+                f"<pre>{tail}</pre>\n\n"
+                "Теперь:\n"
+                "1. Открой https://dashboard.sharlovsky.pro/ в режиме инкогнито\n"
+                "2. Должен быть зелёный замочек 🔒\n"
+                "3. После этого можешь и в обычном окне — браузер запомнит HSTS",
+                parse_mode="HTML",
+            )
+        else:
+            await message.answer(
+                f"⚠ Скрипт упал (код {result.returncode}):\n<pre>{tail}</pre>",
+                parse_mode="HTML",
+            )
+    except subprocess.TimeoutExpired:
+        await message.answer("⚠ Скрипт работает дольше 2 минут — что-то не так.")
+    except Exception as e:
+        await message.answer(f"⚠ Ошибка: {e}")
+
+
 # ─── /admin (помощь) ───────────────────────────────────────────────
 
 @router.message(Command("admin"))
@@ -425,6 +472,8 @@ async def cmd_admin_help(message: Message) -> None:
         "Prodamus (если webhook'и валятся с 'bad signature')\n"
         "<code>/addpayment &lt;…&gt;</code> — дозаписать платёж вручную "
         "(если webhook потерял оплату). Потом /fixpay для классификации\n"
+        "<code>/forcehttps</code> — принудительно включить http→https редирект "
+        "и HSTS (если в браузере «Не защищено» с валидным сертификатом)\n"
         "<code>/deployurl</code> — показать URL для GitHub-вебхука "
         "(один раз настроишь — авто-деплой при push в main, /redeploy больше не нужен)",
         parse_mode="HTML",
