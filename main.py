@@ -26,15 +26,14 @@ import os
 import threading
 
 from bot import main as bot_main
+# web.py теперь сам регистрирует webhook_bp (см. конец web.py), поэтому
+# здесь мы просто импортируем готовое приложение.
 from web import app as web_app
-from webhook import bp as webhook_bp
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("entrypoint")
 
 PORT = int(os.environ.get("PORT", "3000"))
-
-web_app.register_blueprint(webhook_bp)
 
 
 def run_http() -> None:
