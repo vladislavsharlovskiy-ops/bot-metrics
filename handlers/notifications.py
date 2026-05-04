@@ -1,9 +1,9 @@
 """
-Ежедневная утренняя сводка по «зависшим» лидам.
+Утренняя сводка по «зависшим» лидам — раз в два дня.
 
-В 9:00 утра по локальному времени бот присылает владельцу список лидов на
-этапе «Разбор отправлен», у которых 2+ дней не было движения, с кнопками
-действий по каждому (использует те же callback_data, что и карточка лида).
+В 9:00 МСК бот присылает владельцу список лидов, по которым 2+ дней нет
+движения: этап «Разбор отправлен» И «Игнорят». По каждому — кнопки действий
+(те же callback_data, что у карточки лида).
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from sqlalchemy import select
 from config import OWNER_ID
 from db import get_session
 from models import Lead
-from stages import BREAKDOWN_SENT, SOURCE_TITLES
+from stages import BREAKDOWN_SENT, IGNORING, SOURCE_TITLES
 
 router = Router()
 log = logging.getLogger("digest")
@@ -29,7 +29,8 @@ log = logging.getLogger("digest")
 DIGEST_HOUR = 9
 DIGEST_MINUTE = 0
 STUCK_DAYS = 2
-DIGEST_STAGES = {BREAKDOWN_SENT}
+DIGEST_PERIOD_DAYS = 2  # раз в сколько дней присылать сводку
+DIGEST_STAGES = {BREAKDOWN_SENT, IGNORING}
 MSK = ZoneInfo("Europe/Moscow")
 
 
@@ -57,7 +58,8 @@ def _days_word(n: int) -> str:
 def _lead_block(lead: Lead, days_idle: int) -> str:
     src = SOURCE_TITLES.get(lead.source, lead.source)
     name = lead.name or lead.username or f"#{lead.id}"
-    text = f"<b>{name}</b> · {src}\n"
+    stage_tag = "🤐 В игноре" if lead.stage == IGNORING else "📨 Разбор отправлен"
+    text = f"<b>{name}</b> · {src}\n{stage_tag}\n"
     if lead.username:
         text += f"Логин: {lead.username}\n"
     text += f"⏳ Без движения: <b>{days_idle} {_days_word(days_idle)}</b>\n"
@@ -92,7 +94,7 @@ async def send_digest(bot: Bot) -> None:
         OWNER_ID,
         f"🌅 <b>Доброе утро!</b>\n\n"
         f"Лидов на дожим: <b>{len(leads)}</b>\n"
-        f"<i>(этап «Разбор отправлен», {STUCK_DAYS}+ {_days_word(STUCK_DAYS)} без ответа)</i>",
+        f"<i>(Разбор отправлен или В игноре, {STUCK_DAYS}+ {_days_word(STUCK_DAYS)} без движения)</i>",
     )
 
     now = datetime.now()
@@ -111,22 +113,36 @@ async def cmd_digest(message: Message, bot: Bot) -> None:
     await send_digest(bot)
 
 
-def _seconds_until_next_run() -> float:
+def _seconds_until_next_run(last_sent: datetime | None) -> float:
+    """
+    Следующее ближайшее окно DIGEST_HOUR:DIGEST_MINUTE МСК, через которое
+    после last_sent прошло >= DIGEST_PERIOD_DAYS суток. Если ещё ни разу
+    не слали — берём ближайшее окно (через 9:00 завтра либо сегодня).
+    """
     now = datetime.now(MSK)
     target = now.replace(hour=DIGEST_HOUR, minute=DIGEST_MINUTE, second=0, microsecond=0)
     if target <= now:
         target += timedelta(days=1)
+    if last_sent is not None:
+        earliest = last_sent + timedelta(days=DIGEST_PERIOD_DAYS)
+        while target < earliest:
+            target += timedelta(days=1)
     return (target - now).total_seconds()
 
 
 async def digest_loop(bot: Bot) -> None:
-    """Бесконечный цикл: спим до ближайших 9:00, отправляем, повторяем."""
+    """Бесконечный цикл: спим до следующего окна (раз в DIGEST_PERIOD_DAYS дней в 9:00 МСК)."""
+    last_sent: datetime | None = None
     while True:
-        wait = _seconds_until_next_run()
-        log.info("Next digest in %.0f minutes (at %02d:%02d МСК)", wait / 60, DIGEST_HOUR, DIGEST_MINUTE)
+        wait = _seconds_until_next_run(last_sent)
+        log.info(
+            "Next digest in %.0f minutes (every %d days at %02d:%02d МСК)",
+            wait / 60, DIGEST_PERIOD_DAYS, DIGEST_HOUR, DIGEST_MINUTE,
+        )
         try:
             await asyncio.sleep(wait)
             await send_digest(bot)
+            last_sent = datetime.now(MSK)
         except asyncio.CancelledError:
             raise
         except Exception as e:
