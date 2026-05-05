@@ -400,10 +400,11 @@ function dash() {
       const monthClients = this.summary.month_clients || 0;
       const monthRevenue = this.summary.month_revenue || 0;
       const avgCheck = this.summary.month_avg_check || 0;
-      // Конверсия за месяц: уникальных оплативших лидов / пришедших заявок
-      const monthPaid = (this.summary.month.paid || 0)
-                     + (this.summary.month.consulted || 0)
-                     + (this.summary.month.package_bought || 0);
+      // Конверсия за месяц: уникальных оплативших лидов / пришедших заявок.
+      // После PR #28 voronka монотонна: month.paid уже включает CONSULTED и
+      // PACKAGE_BOUGHT, поэтому суммировать не нужно (раньше — суммировали и
+      // получали x2/x3 переучёт; см. PR #30 для серверной части).
+      const monthPaid = (this.summary.month.paid || 0);
       const conv = monthLeads ? Math.round(monthPaid / monthLeads * 100) : null;
       return [
         { label: 'Заявок за месяц', value: monthLeads,
