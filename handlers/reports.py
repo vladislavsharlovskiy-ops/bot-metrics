@@ -123,6 +123,21 @@ def _payments_count(start: datetime, end: datetime) -> int:
         ).scalar_one() or 0)
 
 
+def _repeat_sessions_count(start: datetime, end: datetime) -> int:
+    """
+    Сколько RepeatSession создано в [start, end). Каждая повторная оплата
+    от существующего клиента создаёт сессию → 1 RepeatSession = 1 повторная
+    заявка. Синхронизировано с web._repeat_sessions_count.
+    """
+    from models import RepeatSession  # отдельный import чтобы не ломать порядок
+    with get_session() as session:
+        return int(session.execute(
+            select(func.count(RepeatSession.id))
+            .where(RepeatSession.created_at >= start)
+            .where(RepeatSession.created_at < end)
+        ).scalar_one() or 0)
+
+
 def _pct(numer: int, denom: int) -> str:
     if denom == 0:
         return "—"
@@ -131,11 +146,13 @@ def _pct(numer: int, denom: int) -> str:
 
 def _format_period_report(title: str, start: datetime, end: datetime, counts: dict[str, int]) -> str:
     """
-    Отчёт за период. «Оплат» = реальное число Payment-записей (первичка +
-    повторка), а не leads at PAID — это синхронизирует бот с дашбордом
-    «Все» вкладкой. Раньше /month показывал 4, дашборд — 5; теперь оба 5.
+    Отчёт за период. «Заявок» = первичные лиды + повторные RepeatSessions
+    (синхронизировано с дашбордом, вкладка «Все»). «Оплат» = реальное число
+    Payment-записей (первичка + повторка). Конверсии считаются от total leads.
     """
-    leads = counts.get(LEAD_NEW, 0)
+    first_leads = counts.get(LEAD_NEW, 0)
+    repeat_sessions = _repeat_sessions_count(start, end)
+    total_leads = first_leads + repeat_sessions
     payments = _payments_count(start, end)
     counts_for_display = dict(counts)
     counts_for_display[PAID] = payments
@@ -144,9 +161,15 @@ def _format_period_report(title: str, start: datetime, end: datetime, counts: di
     for code, label in STAGES_FOR_REPORT:
         n = counts_for_display.get(code, 0)
         if code == LEAD_NEW:
-            lines.append(f"{label}: <b>{n}</b>")
+            if repeat_sessions:
+                lines.append(
+                    f"{label}: <b>{total_leads}</b> "
+                    f"({first_leads} первичка + {repeat_sessions} повторка)"
+                )
+            else:
+                lines.append(f"{label}: <b>{total_leads}</b>")
         else:
-            lines.append(f"{label}: <b>{n}</b> ({_pct(n, leads)} от заявок)")
+            lines.append(f"{label}: <b>{n}</b> ({_pct(n, total_leads)} от заявок)")
     return "\n".join(lines)
 
 
