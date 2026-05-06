@@ -28,6 +28,7 @@ from stages import (
     QUALIFIED,
     SOURCES,
     SOURCE_TITLES,
+    codes_at_or_after,
     next_stage,
 )
 
@@ -89,23 +90,18 @@ def _month_range():
 def _counts_in_period(start, end, source=None):
     """
     Сколько лидов «достигли этапа X или дальше» в периоде [start, end).
+    Воронка строго монотонна: Заявка ≥ Квал ≥ Разбор ≥ Оплата ≥ ...
 
-    Раньше считали лидов с stage_history С КОНКРЕТНЫМ stage в периоде. Это
-    ломало монотонность воронки: лид, попавший в БД сразу с LEAD_NEW + PAID
-    (например, через webhook Prodamus или /addpayment), пропускал
-    промежуточные этапы — у него нет записей для qualified, breakdown_sent,
-    agreed, поэтому Оплата получалась больше, чем Согласие.
-
-    Теперь для каждого этапа берём лидов, у которых есть запись stage_history
-    либо для самого этапа, либо для любого ПОЗДНЕГО. Раз лид дошёл до Оплаты —
-    значит логически прошёл через все предыдущие этапы, даже если они не
-    зафиксированы отдельной записью. Воронка получается строго монотонной:
-    Заявка ≥ Квал ≥ Разбор ≥ Согласие ≥ Оплата ≥ Консультация ≥ Пакет.
+    Использует codes_at_or_after из stages.py, в котором AGREED включён
+    в полный порядок этапов даже несмотря на то, что AGREED убран из
+    отображаемого FUNNEL — это нужно чтобы существующие лиды на этапе
+    AGREED (по запросу пользователя удалили из видимой воронки) всё
+    равно попадали в счёт ранних этапов.
     """
     out = {}
     with get_session() as session:
-        for i, s in enumerate(FUNNEL):
-            later_codes = [st.code for st in FUNNEL[i:]]
+        for s in FUNNEL:
+            later_codes = codes_at_or_after(s.code)
             q = (
                 select(func.count(func.distinct(StageHistory.lead_id)))
                 .where(StageHistory.stage.in_(later_codes))
@@ -249,7 +245,20 @@ RU_MONTHS = [
 ]
 
 
-def _month_metrics(year: int, month: int) -> dict:
+def _month_metrics(year: int, month: int, payment_types: list[str] | None = None) -> dict:
+    """
+    Метрики месяца. payment_types фильтрует Payment в подсчёте 'paid'
+    (count записей платежа) и в выручке. По умолчанию ['first', 'repeat'] —
+    видим всё.
+
+    'paid' теперь = count(Payment), а не «leads, дошедшие до PAID». Это
+    нужно для консистентности с карточкой «Оплат за месяц» на дашборде:
+    повторки от существующих клиентов не создают новых stage_history
+    записей, и раньше счёт лидов не совпадал с реальным числом платежей.
+    """
+    if payment_types is None:
+        payment_types = ["first", "repeat"]
+
     start = datetime(year, month, 1)
     end = datetime(year + 1, 1, 1) if month == 12 else datetime(year, month + 1, 1)
     counts = _counts_in_period(start, end)
@@ -266,11 +275,23 @@ def _month_metrics(year: int, month: int) -> dict:
             .where(Payment.paid_at < end)
             .where(Payment.payment_type == "repeat")
         ).scalar_one()
+        # 'paid' = реальные платежи (с учётом scope-фильтра), а не leads-funnel.
+        paid_count = session.execute(
+            select(func.count(Payment.id))
+            .where(Payment.paid_at >= start)
+            .where(Payment.paid_at < end)
+            .where(Payment.payment_type.in_(payment_types))
+        ).scalar_one()
     leads = counts.get(LEAD_NEW, 0)
-    # После PR #28 _counts_in_period возвращает «лид достиг этапа X ИЛИ дальше».
-    # Поэтому counts.get(PAID) уже включает CONSULTED и PACKAGE_BOUGHT — НЕ надо
-    # их складывать ещё раз (раньше так делали и получали x2-x3 переучёт).
-    paid = counts.get(PAID, 0)
+    paid = int(paid_count or 0)
+    if payment_types == ["first", "repeat"]:
+        revenue_total = float((rev_first or 0) + (rev_repeat or 0))
+    elif payment_types == ["first"]:
+        revenue_total = float(rev_first or 0)
+    elif payment_types == ["repeat"]:
+        revenue_total = float(rev_repeat or 0)
+    else:
+        revenue_total = float((rev_first or 0) + (rev_repeat or 0))
     return {
         "year": year,
         "month": month,
@@ -282,13 +303,21 @@ def _month_metrics(year: int, month: int) -> dict:
         "conv_paid": (paid / leads) if leads else 0,
         "revenue_first": float(rev_first or 0),
         "revenue_repeat": float(rev_repeat or 0),
-        "revenue_total": float((rev_first or 0) + (rev_repeat or 0)),
+        "revenue_total": revenue_total,
     }
 
 
 @app.get("/api/months")
 def api_months():
-    """Метрики за последние 12 месяцев. Только месяцы, где была активность."""
+    """Метрики за последние 12 месяцев. ?scope=all|first|repeat фильтрует
+    подсчёт оплат и выручки (по аналогии с /api/summary)."""
+    scope = request.args.get("scope", "all")
+    payment_types = {
+        "all": ["first", "repeat"],
+        "first": ["first"],
+        "repeat": ["repeat"],
+    }.get(scope, ["first", "repeat"])
+
     today = datetime.now().date()
     months = []
     for i in range(12):
@@ -296,10 +325,10 @@ def api_months():
         while m <= 0:
             m += 12
             y -= 1
-        months.append(_month_metrics(y, m))
+        months.append(_month_metrics(y, m, payment_types=payment_types))
     # фильтруем месяцы без событий и без выручки
-    active = [m for m in months if m["leads"] or m["revenue_total"]]
-    return jsonify({"months": active or months[:1]})  # хотя бы текущий
+    active = [m for m in months if m["leads"] or m["revenue_total"] or m["paid"]]
+    return jsonify({"months": active or months[:1], "scope": scope})
 
 
 @app.get("/api/period/<scope>")

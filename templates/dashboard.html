@@ -441,14 +441,19 @@ function dash() {
 
       const revenueHint = this.scope === 'first' ? 'только первичка' : 'первичка + повторка';
       const paymentsLabel = this.scope === 'first' ? 'Первичных оплат' : 'Оплат за месяц';
+      // Конверсию считаем ОТ ЧИСЛА ОПЛАТ (а не от leads-funnel) — иначе
+      // на вкладке «Все» 5 оплат не сходятся с «4 из 24» (4 — это leads,
+      // дошедшие до PAID, без учёта повторок). Теперь cards внутри одного
+      // scope консистентны: monthPayments в числителе и в hint.
+      const convPay = monthLeads ? Math.round(monthPayments / monthLeads * 100) : null;
 
       return [
         { label: 'Заявок за месяц', value: monthLeads,
           hint: monthLabel, color: 'text-blue-600' },
         { label: paymentsLabel, value: monthPayments,
           hint: monthPayments ? 'клиентов: ' + monthClients : 'пока нет', color: 'text-emerald-600' },
-        { label: 'Заявка → оплата', value: conv === null ? '—' : (conv + '%'),
-          hint: monthLeads ? monthPaid + ' из ' + monthLeads : 'нет заявок', color: 'text-violet-600' },
+        { label: 'Заявка → оплата', value: convPay === null ? '—' : (convPay + '%'),
+          hint: monthLeads ? monthPayments + ' из ' + monthLeads : 'нет заявок', color: 'text-violet-600' },
         { label: 'Средний чек', value: this.formatMoney(avgCheck),
           hint: monthPayments ? 'за ' + monthPayments + ' оплат' : '—', color: 'text-slate-900' },
         { label: 'Выручка за месяц', value: this.formatMoney(monthRevenue),
@@ -468,7 +473,7 @@ function dash() {
     },
 
     async loadMonths() {
-      const r = await fetch('/api/months');
+      const r = await fetch('/api/months?scope=' + this.scope);
       const d = await r.json();
       this.months = d.months || [];
     },
@@ -486,7 +491,7 @@ function dash() {
     async setScope(scope) {
       if (this.scope === scope) return;
       this.scope = scope;
-      await this.loadSummary();
+      await Promise.all([this.loadSummary(), this.loadMonths()]);
     },
 
     async loadChannels() {
