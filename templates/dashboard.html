@@ -414,42 +414,52 @@ function dash() {
 
     get summaryCards() {
       if (!this.summary) return [];
-      const monthLeads = this.summary.month.lead_new || 0;
+      const firstLeads = this.summary.month.lead_new || 0;
+      const repeatSessions = this.summary.month_repeat_sessions || 0;
+      // monthLeads (заявок за месяц) зависит от scope:
+      //   - all:    первичные + повторные = все заявки месяца
+      //   - first:  только первичные
+      //   - repeat: только повторные (RepeatSessions)
+      // Это синхронизировано с _month_metrics в web.py — таблица «По месяцам»
+      // показывает ту же логику.
+      let monthLeads;
+      if (this.scope === 'first') monthLeads = firstLeads;
+      else if (this.scope === 'repeat') monthLeads = repeatSessions;
+      else monthLeads = firstLeads + repeatSessions;
       const monthPayments = this.summary.month_payments || 0;
       const monthClients = this.summary.month_clients || 0;
       const monthRevenue = this.summary.month_revenue || 0;
       const avgCheck = this.summary.month_avg_check || 0;
-      // monthPaid = лиды, дошедшие до этапа PAID (после PR #28 monotonic
-      // funnel month.paid уже включает CONSULTED и PACKAGE_BOUGHT, не
-      // суммируем).
-      const monthPaid = (this.summary.month.paid || 0);
-      const conv = monthLeads ? Math.round(monthPaid / monthLeads * 100) : null;
       const monthLabel = this.summary.month_label || '';
+      // Конверсия = реальные оплаты / заявки. Числа консистентны с card-ами.
+      const convPay = monthLeads ? Math.round(monthPayments / monthLeads * 100) : null;
 
       if (this.scope === 'repeat') {
-        // Повторки: лиды и воронка не имеют смысла — показываем только
-        // метрики самих повторок.
+        // Повторки: воронка лидов не применима, у нас только сами повторки.
         return [
+          { label: 'Повторных заявок', value: monthLeads,
+            hint: monthLabel, color: 'text-blue-600' },
           { label: 'Повторных оплат', value: monthPayments,
             hint: monthPayments ? 'клиентов: ' + monthClients : 'пока нет', color: 'text-emerald-600' },
-          { label: 'Сумма повторок', value: this.formatMoney(monthRevenue),
-            hint: monthLabel, color: 'text-emerald-700' },
+          { label: 'Заявка → оплата', value: convPay === null ? '—' : (convPay + '%'),
+            hint: monthLeads ? monthPayments + ' из ' + monthLeads : '—', color: 'text-violet-600' },
           { label: 'Средний чек', value: this.formatMoney(avgCheck),
             hint: monthPayments ? 'за ' + monthPayments + ' оплат' : '—', color: 'text-slate-900' },
+          { label: 'Сумма повторок', value: this.formatMoney(monthRevenue),
+            hint: 'только повторка', color: 'text-emerald-700' },
         ];
       }
 
       const revenueHint = this.scope === 'first' ? 'только первичка' : 'первичка + повторка';
       const paymentsLabel = this.scope === 'first' ? 'Первичных оплат' : 'Оплат за месяц';
-      // Конверсию считаем ОТ ЧИСЛА ОПЛАТ (а не от leads-funnel) — иначе
-      // на вкладке «Все» 5 оплат не сходятся с «4 из 24» (4 — это leads,
-      // дошедшие до PAID, без учёта повторок). Теперь cards внутри одного
-      // scope консистентны: monthPayments в числителе и в hint.
-      const convPay = monthLeads ? Math.round(monthPayments / monthLeads * 100) : null;
+      const leadsLabel = this.scope === 'first' ? 'Заявок за месяц' : 'Заявок за месяц';
+      const leadsHint = this.scope === 'all' && repeatSessions
+        ? `${firstLeads} первичка + ${repeatSessions} повторка`
+        : monthLabel;
 
       return [
-        { label: 'Заявок за месяц', value: monthLeads,
-          hint: monthLabel, color: 'text-blue-600' },
+        { label: leadsLabel, value: monthLeads,
+          hint: leadsHint, color: 'text-blue-600' },
         { label: paymentsLabel, value: monthPayments,
           hint: monthPayments ? 'клиентов: ' + monthClients : 'пока нет', color: 'text-emerald-600' },
         { label: 'Заявка → оплата', value: convPay === null ? '—' : (convPay + '%'),

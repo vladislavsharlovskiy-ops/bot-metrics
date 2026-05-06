@@ -10,7 +10,7 @@ from sqlalchemy import func, or_, select
 
 from config import LEADS_API_KEY
 from db import get_session
-from models import Client, Lead, Payment, StageHistory
+from models import Client, Lead, Payment, RepeatSession, StageHistory
 from stages import (
     ACTIVE_CODES,
     BY_CODE,
@@ -85,6 +85,24 @@ def _month_range():
     else:
         e = s.replace(month=s.month + 1)
     return s, e
+
+
+def _repeat_sessions_count(start, end) -> int:
+    """
+    Сколько RepeatSession создано в [start, end). Это «повторных заявок».
+    Каждая повторная оплата от существующего клиента создаёт RepeatSession,
+    поэтому 1 RepeatSession = 1 повторная заявка.
+
+    Используется для total leads count: на «Все» вкладке заявки = первичные
+    лиды + повторные заявки (RepeatSessions); на «Постоянные» вкладке заявки
+    = только повторные.
+    """
+    with get_session() as session:
+        return int(session.execute(
+            select(func.count(RepeatSession.id))
+            .where(RepeatSession.created_at >= start)
+            .where(RepeatSession.created_at < end)
+        ).scalar_one() or 0)
 
 
 def _counts_in_period(start, end, source=None):
@@ -183,6 +201,14 @@ def api_summary():
 
     month_label = f"{RU_MONTHS[month_s.month - 1]} {month_s.year}"
 
+    # «Повторные заявки» = count(RepeatSession) в периоде. Каждая повторная
+    # оплата от существующего клиента создаёт сессию → 1 RepeatSession =
+    # 1 повторная заявка. Используется на дашборде для тотала «Заявок» по
+    # вкладкам (см. summaryCards в dashboard.html).
+    month_repeat_sessions = _repeat_sessions_count(month_s, month_e)
+    week_repeat_sessions = _repeat_sessions_count(week_s, week_e)
+    today_repeat_sessions = _repeat_sessions_count(today_s, today_e)
+
     return jsonify({
         "today": today,
         "week": week,
@@ -194,6 +220,9 @@ def api_summary():
         "month_payments": month_payments,
         "month_clients": int(month_clients),
         "month_avg_check": month_avg,
+        "month_repeat_sessions": month_repeat_sessions,
+        "week_repeat_sessions": week_repeat_sessions,
+        "today_repeat_sessions": today_repeat_sessions,
         "scope": scope,
     })
 
@@ -262,6 +291,7 @@ def _month_metrics(year: int, month: int, payment_types: list[str] | None = None
     start = datetime(year, month, 1)
     end = datetime(year + 1, 1, 1) if month == 12 else datetime(year, month + 1, 1)
     counts = _counts_in_period(start, end)
+    repeat_sessions = _repeat_sessions_count(start, end)
     with get_session() as session:
         rev_first = session.execute(
             select(func.coalesce(func.sum(Payment.amount), 0))
@@ -282,21 +312,29 @@ def _month_metrics(year: int, month: int, payment_types: list[str] | None = None
             .where(Payment.paid_at < end)
             .where(Payment.payment_type.in_(payment_types))
         ).scalar_one()
-    leads = counts.get(LEAD_NEW, 0)
+    first_leads = counts.get(LEAD_NEW, 0)
     paid = int(paid_count or 0)
+    # leads для отчёта зависит от scope: на «Все» считаем первичку + повторку,
+    # на «Первичка» — только первичку, на «Повторка» — только повторные сессии.
     if payment_types == ["first", "repeat"]:
+        leads = first_leads + repeat_sessions
         revenue_total = float((rev_first or 0) + (rev_repeat or 0))
     elif payment_types == ["first"]:
+        leads = first_leads
         revenue_total = float(rev_first or 0)
     elif payment_types == ["repeat"]:
+        leads = repeat_sessions
         revenue_total = float(rev_repeat or 0)
     else:
+        leads = first_leads + repeat_sessions
         revenue_total = float((rev_first or 0) + (rev_repeat or 0))
     return {
         "year": year,
         "month": month,
         "label": f"{RU_MONTHS[month - 1]} {year}",
         "leads": leads,
+        "first_leads": first_leads,
+        "repeat_sessions": repeat_sessions,
         "qualified": counts.get(QUALIFIED, 0),
         "paid": paid,
         "package_bought": counts.get(PACKAGE_BOUGHT, 0),
