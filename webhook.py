@@ -74,6 +74,37 @@ def _match_client(session, phone: Optional[str], email: Optional[str]) -> Option
     return session.execute(select(Client).where(or_(*conds))).scalars().first()
 
 
+def _match_clients(
+    session, name: Optional[str], phone: Optional[str], email: Optional[str], limit: int = 5,
+) -> list[Client]:
+    """
+    Ищет кандидатов-клиентов (постоянников) по имени, телефону, email.
+    Возвращает до `limit` штук, отсортированных по свежести оплат.
+    Используется для диалога классификации платежа: пользователь выбирает,
+    к какому существующему клиенту привязать платёж как «повторку».
+    """
+    conds = []
+    if name:
+        for word in name.split():
+            if len(word) >= 3:
+                conds.append(Client.name.ilike(f"%{word}%"))
+    if phone:
+        conds.append(Client.phone == phone)
+        digits = _phone_digits(phone)
+        if digits and len(digits) >= 7:
+            conds.append(Client.phone.ilike(f"%{digits[-7:]}%"))
+    if email:
+        conds.append(Client.email == email)
+    if not conds:
+        return []
+    rows = session.execute(
+        select(Client).where(or_(*conds))
+        .order_by(Client.last_payment_at.desc().nullslast())
+        .limit(limit)
+    ).scalars().all()
+    return list(rows)
+
+
 def _phone_digits(phone: Optional[str]) -> Optional[str]:
     """Только цифры из телефона; берём последние 10 — это надёжное ядро номера в РФ."""
     if not phone:
@@ -163,16 +194,23 @@ def prodamus_webhook():
             log.info("Duplicate payment %s — ignored", p["prodamus_id"])
             return jsonify({"ok": True, "duplicate": True})
 
-        # ищем клиента
-        client = _match_client(session, p["customer_phone"], p["customer_email"])
-        lead_candidates = []
-        if not client:
-            lead_candidates = _match_leads(
-                session,
-                p["customer_name"],
-                p["customer_phone"],
-                p["customer_email"],
-            )
+        # Раньше тут было авто-классифицирование как «повторка», если phone/email
+        # совпали с существующим клиентом. Теперь — НЕ авто-классифицируем,
+        # всегда спрашиваем владельца. Это даёт полный контроль и делает
+        # дашборд-метрики предсказуемыми (никаких сюрпризов когда платёж
+        # «случайно» подцепился к не тому клиенту).
+        client_candidates = _match_clients(
+            session,
+            p["customer_name"],
+            p["customer_phone"],
+            p["customer_email"],
+        )
+        lead_candidates = _match_leads(
+            session,
+            p["customer_name"],
+            p["customer_phone"],
+            p["customer_email"],
+        )
 
         payment = Payment(
             prodamus_id=p["prodamus_id"],
@@ -183,27 +221,14 @@ def prodamus_webhook():
             customer_phone=p["customer_phone"],
             customer_email=p["customer_email"],
             product=p["product"],
+            payment_type="unclassified",
             raw_json=json.dumps(nested, ensure_ascii=False)[:8000],
         )
+        session.add(payment)
+        session.commit()
+        session.refresh(payment)
 
-        if client:
-            # Совпадение с существующим клиентом → авто-повторка
-            payment.client_id = client.id
-            payment.payment_type = "repeat"
-            client.last_payment_at = paid_at
-            session.add(payment)
-            session.commit()
-            session.refresh(payment)
-            _notify_auto_repeat(payment, client)
-        else:
-            # Не нашли клиента — спрашиваем у владельца, какой лид (или новый клиент)
-            payment.payment_type = "unclassified"
-            if lead_candidates:
-                payment.lead_id = lead_candidates[0].id
-            session.add(payment)
-            session.commit()
-            session.refresh(payment)
-            _notify_classify(payment, lead_candidates)
+        _notify_classify(payment, lead_candidates, client_candidates)
 
     return jsonify({"ok": True})
 
@@ -295,23 +320,59 @@ def _lead_button_label(lead: Lead) -> str:
     return label[:48]
 
 
-def _notify_classify(payment: Payment, lead_candidates: list[Lead]) -> None:
+def _client_button_label(client: Client) -> str:
+    """Подпись кнопки для клиента: имя + последняя оплата."""
+    name = client.name or client.phone or client.email or f"#{client.id}"
+    label = f"🔁 #{client.id} · {name}"
+    if client.last_payment_at:
+        label += f" · {client.last_payment_at:%d.%m.%Y}"
+    return label[:48]
+
+
+def _notify_classify(
+    payment: Payment,
+    lead_candidates: list[Lead],
+    client_candidates: list[Client] | None = None,
+) -> None:
+    """
+    Спрашиваем владельца, как классифицировать платёж: первичка/повторка.
+
+    Кнопки с СУЩЕСТВУЮЩИМИ клиентами (постоянниками) → отметить как «повторка»
+    к выбранному клиенту. Кнопки с лидами → отметить как «первичка» от лида.
+    Плюс «Новый клиент» (первичка с нуля), «Новый постоянник» (повторка без
+    лида) и «Игнор».
+    """
+    client_candidates = client_candidates or []
     text = _payment_header(payment)
-    rows = []
+    rows: list[list[dict]] = []
+
+    if client_candidates:
+        text += "\n\n🤝 <b>Возможные совпадения с клиентами (постоянники):</b>"
+        for c in client_candidates:
+            who = c.name or c.phone or c.email or f"#{c.id}"
+            last = f", последняя оплата {c.last_payment_at:%d.%m.%Y}" if c.last_payment_at else ""
+            text += f"\n• {who}{last}"
+            rows.append([{
+                "text": _client_button_label(c),
+                "callback_data": f"pay:repeat_existing:{payment.id}:{c.id}",
+            }])
+
     if lead_candidates:
-        text += "\n\n🔍 <b>Возможные совпадения с лидами:</b>"
+        text += "\n\n🎯 <b>Возможные совпадения с лидами (первичка):</b>"
         for lead in lead_candidates:
             text += f"\n• #{lead.id} «{lead.name or lead.username}» — {lead.source}"
             rows.append([{
                 "text": _lead_button_label(lead),
                 "callback_data": f"pay:first_lead:{payment.id}:{lead.id}",
             }])
-        text += "\n\nЕсли это новый клиент — нажми «Новый клиент»."
-    else:
-        text += "\n\n❓ <b>Не нашли клиента в базе.</b>"
+
+    if not client_candidates and not lead_candidates:
+        text += "\n\n❓ <b>Совпадений в базе нет.</b>"
+
+    text += "\n\nИли:"
     rows.append([{"text": "➕ Новый клиент (первичка)",
                    "callback_data": f"pay:first_new:{payment.id}"}])
-    rows.append([{"text": "🔁 Повторка (новый клиент)",
+    rows.append([{"text": "🔁 Новый постоянник (повторка без лида)",
                    "callback_data": f"pay:repeat_new:{payment.id}"}])
     rows.append([{"text": "🚫 Игнорировать платёж",
                    "callback_data": f"pay:ignore:{payment.id}"}])
