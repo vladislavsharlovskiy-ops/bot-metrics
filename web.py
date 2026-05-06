@@ -129,7 +129,23 @@ def index():
 
 @app.get("/api/summary")
 def api_summary():
-    """Шапка дашборда: всё за текущий месяц + неделя/сегодня для совместимости."""
+    """
+    Шапка дашборда: всё за текущий месяц + неделя/сегодня для совместимости.
+
+    Параметр ?scope=all|first|repeat фильтрует Payment.payment_type — это
+    чтобы дашборд не смешивал первичные и повторные продажи в одной
+    карточке (раньше 'оплат за месяц: 5' включало 4 первички + 1 повторку,
+    а воронка 'Оплата: 4' считала только первичек, что выглядело багом).
+    """
+    scope = request.args.get("scope", "all")
+    if scope not in ("all", "first", "repeat"):
+        scope = "all"
+    payment_types = {
+        "all": ["first", "repeat"],
+        "first": ["first"],
+        "repeat": ["repeat"],
+    }[scope]
+
     today_s, today_e = _today_range()
     week_s, week_e = _week_range()
     month_s, month_e = _month_range()
@@ -145,7 +161,7 @@ def api_summary():
             select(func.count(Lead.id)).where(Lead.stage.in_(CLIENT_CODES))
         ).scalar_one()
 
-        # Реальные платежи за месяц — игнорируем unclassified/ignored
+        # Фильтруем по scope (первичка / повторка / всё)
         month_pay = session.execute(
             select(
                 func.coalesce(func.sum(Payment.amount), 0),
@@ -153,21 +169,20 @@ def api_summary():
             )
             .where(Payment.paid_at >= month_s)
             .where(Payment.paid_at < month_e)
-            .where(Payment.payment_type.in_(["first", "repeat"]))
+            .where(Payment.payment_type.in_(payment_types))
         ).one()
         month_revenue = float(month_pay[0] or 0)
         month_payments = int(month_pay[1] or 0)
         month_avg = (month_revenue / month_payments) if month_payments else 0
 
-        # Уникальных клиентов, заплативших в этом месяце (а не общим итогом).
-        # Считаем distinct по client_id и lead_id (на случай платежей без client).
+        # Уникальных клиентов с оплатой нужного типа в этом месяце
         month_clients = session.execute(
             select(func.count(func.distinct(
                 func.coalesce(Payment.client_id, -Payment.lead_id)
             )))
             .where(Payment.paid_at >= month_s)
             .where(Payment.paid_at < month_e)
-            .where(Payment.payment_type.in_(["first", "repeat"]))
+            .where(Payment.payment_type.in_(payment_types))
         ).scalar_one() or 0
 
     month_label = f"{RU_MONTHS[month_s.month - 1]} {month_s.year}"
@@ -183,6 +198,7 @@ def api_summary():
         "month_payments": month_payments,
         "month_clients": int(month_clients),
         "month_avg_check": month_avg,
+        "scope": scope,
     })
 
 
