@@ -34,6 +34,7 @@ from stages import (
     PACKAGE_BOUGHT,
     PAID,
     QUALIFIED,
+    codes_at_or_after,
     SOURCE_TITLES,
     SOURCES,
 )
@@ -74,11 +75,12 @@ def _period_label(start: datetime, end: datetime) -> str:
 
 # ───────── core counters ─────────
 
+# AGREED убран — синхронизировано с дашбордом по запросу пользователя
+# («согласие = это и есть оплата, не нужно отдельно»).
 STAGES_FOR_REPORT = [
     (LEAD_NEW,        "Заявок"),
     (QUALIFIED,       "Квал"),
     (BREAKDOWN_SENT,  "Разборов отправлено"),
-    (AGREED,          "Согласий"),
     (PAID,            "Оплат"),
     (CONSULTED,       "Консультаций проведено"),
     (PACKAGE_BOUGHT,  "Куплено пакетов"),
@@ -86,13 +88,17 @@ STAGES_FOR_REPORT = [
 
 
 def _counts_in_period(start: datetime, end: datetime, source: str | None = None) -> dict[str, int]:
-    """For each stage code, distinct count of leads that reached that stage in [start, end)."""
+    """
+    Cumulative counts: лиды на этапе X ИЛИ позже в [start, end).
+    Синхронизировано с web._counts_in_period (см. PR #28+).
+    """
     result: dict[str, int] = {}
     with get_session() as session:
         for code, _ in STAGES_FOR_REPORT:
+            later_codes = codes_at_or_after(code)
             q = (
                 select(func.count(func.distinct(StageHistory.lead_id)))
-                .where(StageHistory.stage == code)
+                .where(StageHistory.stage.in_(later_codes))
                 .where(StageHistory.changed_at >= start)
                 .where(StageHistory.changed_at < end)
             )
@@ -102,17 +108,41 @@ def _counts_in_period(start: datetime, end: datetime, source: str | None = None)
     return result
 
 
+def _payments_count(start: datetime, end: datetime) -> int:
+    """
+    Реальное число платежей (first + repeat) в периоде.
+    Синхронизировано с card «Оплат за месяц» на дашборде «Все»: повторки
+    от существующих клиентов сюда тоже попадают, в отличие от lead-funnel.
+    """
+    with get_session() as session:
+        return int(session.execute(
+            select(func.count(Payment.id))
+            .where(Payment.paid_at >= start)
+            .where(Payment.paid_at < end)
+            .where(Payment.payment_type.in_(["first", "repeat"]))
+        ).scalar_one() or 0)
+
+
 def _pct(numer: int, denom: int) -> str:
     if denom == 0:
         return "—"
     return f"{numer * 100 / denom:.0f}%"
 
 
-def _format_period_report(title: str, counts: dict[str, int]) -> str:
+def _format_period_report(title: str, start: datetime, end: datetime, counts: dict[str, int]) -> str:
+    """
+    Отчёт за период. «Оплат» = реальное число Payment-записей (первичка +
+    повторка), а не leads at PAID — это синхронизирует бот с дашбордом
+    «Все» вкладкой. Раньше /month показывал 4, дашборд — 5; теперь оба 5.
+    """
     leads = counts.get(LEAD_NEW, 0)
+    payments = _payments_count(start, end)
+    counts_for_display = dict(counts)
+    counts_for_display[PAID] = payments
+
     lines = [f"📊 <b>{title}</b>"]
     for code, label in STAGES_FOR_REPORT:
-        n = counts.get(code, 0)
+        n = counts_for_display.get(code, 0)
         if code == LEAD_NEW:
             lines.append(f"{label}: <b>{n}</b>")
         else:
@@ -134,7 +164,7 @@ def _format_channels_block(start: datetime, end: datetime) -> str:
 
 async def _send_period(message: Message, label: str, start: datetime, end: datetime) -> None:
     counts = _counts_in_period(start, end)
-    text = _format_period_report(f"{label} ({_period_label(start, end)})", counts)
+    text = _format_period_report(f"{label} ({_period_label(start, end)})", start, end, counts)
     text += "\n" + _format_channels_block(start, end)
     await message.answer(text)
 
