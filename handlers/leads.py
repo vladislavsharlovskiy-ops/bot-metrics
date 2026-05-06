@@ -75,8 +75,18 @@ def _format_lead(lead: Lead) -> str:
     эмодзи-замещалкой), Telegram отвечает «can't parse entities», edit_text
     падает, бот не успевает call.answer(), и в клиенте навсегда висит
     «Загрузка...».
+
+    Длинные тексты (request, notes) обрезаем до 1500 симв., чтобы общий
+    размер сообщения не превысил Telegram-лимит 4096 (иначе edit_text
+    кидает MESSAGE_TOO_LONG, опять «Загрузка...» навсегда). Полный текст
+    видно в дашборде.
     """
     from html import escape
+
+    def _trim(text: str, limit: int = 1500) -> str:
+        if len(text) <= limit:
+            return text
+        return text[:limit].rstrip() + f"… (+{len(text) - limit} симв., полностью на дашборде)"
 
     stage = BY_CODE.get(lead.stage)
     stage_title = stage.title if stage else lead.stage
@@ -89,13 +99,18 @@ def _format_lead(lead: Lead) -> str:
         f"Логин: {escape(lead.username) if lead.username else '—'}",
     ]
     if lead.request:
-        parts.append(f"Запрос: {escape(lead.request)}")
+        parts.append(f"Запрос: {escape(_trim(lead.request))}")
     if lead.notes:
-        parts.append(f"Заметка: {escape(lead.notes)}")
+        parts.append(f"Заметка: {escape(_trim(lead.notes))}")
     if lead.stage == LOST and lead.lost_reason:
-        parts.append(f"Причина отвала: {escape(lead.lost_reason)}")
+        parts.append(f"Причина отвала: {escape(_trim(lead.lost_reason, 500))}")
     parts.append(f"Создан: {lead.created_at:%d.%m.%Y %H:%M}")
-    return "\n".join(parts)
+    text = "\n".join(parts)
+    # Финальный страховочный обрез на 4000 (с запасом до Telegram-лимита 4096),
+    # на случай очень длинных name/username/etc.
+    if len(text) > 4000:
+        text = text[:3990] + "\n…(обрезано)"
+    return text
 
 
 # ───────── /new wizard ─────────
