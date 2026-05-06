@@ -68,22 +68,32 @@ EDITABLE_TEXT_FIELDS = {
 
 
 def _format_lead(lead: Lead) -> str:
+    """
+    Карточка лида в HTML. Все поля от пользователя (name, username, request,
+    notes, lost_reason) экранируем через html.escape — иначе если в тексте
+    есть '<', '>' или '&' (например, клиент написал что-то с тегом или
+    эмодзи-замещалкой), Telegram отвечает «can't parse entities», edit_text
+    падает, бот не успевает call.answer(), и в клиенте навсегда висит
+    «Загрузка...».
+    """
+    from html import escape
+
     stage = BY_CODE.get(lead.stage)
     stage_title = stage.title if stage else lead.stage
     src = SOURCE_TITLES.get(lead.source, lead.source)
     parts = [
         f"<b>Лид #{lead.id}</b>",
-        f"Этап: <b>{stage_title}</b>",
-        f"Источник: {src}",
-        f"Имя: {lead.name or '—'}",
-        f"Логин: {lead.username or '—'}",
+        f"Этап: <b>{escape(stage_title)}</b>",
+        f"Источник: {escape(src)}",
+        f"Имя: {escape(lead.name) if lead.name else '—'}",
+        f"Логин: {escape(lead.username) if lead.username else '—'}",
     ]
     if lead.request:
-        parts.append(f"Запрос: {lead.request}")
+        parts.append(f"Запрос: {escape(lead.request)}")
     if lead.notes:
-        parts.append(f"Заметка: {lead.notes}")
+        parts.append(f"Заметка: {escape(lead.notes)}")
     if lead.stage == LOST and lead.lost_reason:
-        parts.append(f"Причина отвала: {lead.lost_reason}")
+        parts.append(f"Причина отвала: {escape(lead.lost_reason)}")
     parts.append(f"Создан: {lead.created_at:%d.%m.%Y %H:%M}")
     return "\n".join(parts)
 
@@ -359,14 +369,30 @@ async def cmd_find(message: Message, command: CommandObject) -> None:
 
 @router.callback_query(F.data.startswith("open:"))
 async def cb_open_lead(call: CallbackQuery) -> None:
+    # Сразу гасим «Загрузка...» в клиенте — если ниже что-то упадёт
+    # (несмотря на try/except), пользователь не зависнет в спиннере.
+    await call.answer()
     lead_id = int(call.data.split(":", 1)[1])
     with get_session() as session:
         lead = session.get(Lead, lead_id)
     if lead is None:
-        await call.answer("Лид не найден", show_alert=True)
+        await call.message.answer(f"Лид #{lead_id} не найден.")
         return
-    await call.message.edit_text(_format_lead(lead), reply_markup=lead_card_kb(lead.id, lead.stage))
-    await call.answer()
+    try:
+        await call.message.edit_text(
+            _format_lead(lead),
+            reply_markup=lead_card_kb(lead.id, lead.stage),
+        )
+    except Exception as e:
+        # «message is not modified», «can't parse entities» и т.п. — не фатал.
+        # Шлём карточку отдельным сообщением, чтоб пользователь её всё-таки
+        # увидел, и логируем причину.
+        import logging
+        logging.getLogger("leads").warning("cb_open_lead edit_text failed: %s", e)
+        await call.message.answer(
+            _format_lead(lead),
+            reply_markup=lead_card_kb(lead.id, lead.stage),
+        )
 
 
 async def _send_lead_card(message: Message, lead_id: int) -> None:
