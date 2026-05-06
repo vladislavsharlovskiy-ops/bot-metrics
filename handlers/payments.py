@@ -339,7 +339,51 @@ async def cmd_fixpay(message: Message, bot: Bot) -> None:
     )
 
 
-# ───────── repeat new ─────────
+# ───────── repeat: к существующему клиенту ─────────
+
+@router.callback_query(F.data.startswith("pay:repeat_existing:"))
+async def cb_repeat_existing(call: CallbackQuery) -> None:
+    """
+    «🔁 Повторка от {клиент N}»: владелец явно выбрал, к какому существующему
+    клиенту (постояннику) привязать этот платёж. Это замена авто-классификации
+    по совпадению phone/email — теперь решение всегда за пользователем.
+    """
+    parts = call.data.split(":")
+    payment_id, client_id = int(parts[2]), int(parts[3])
+    with get_session() as session:
+        payment = session.get(Payment, payment_id)
+        client = session.get(Client, client_id)
+        if not payment or not client:
+            await call.answer("Платёж или клиент не найден", show_alert=True)
+            return
+
+        payment.client_id = client.id
+        payment.payment_type = "repeat"
+        # Поддерживаем дату последней оплаты в актуальном состоянии
+        if not client.first_payment_at:
+            client.first_payment_at = payment.paid_at
+        if not client.last_payment_at or (payment.paid_at and payment.paid_at > client.last_payment_at):
+            client.last_payment_at = payment.paid_at
+
+        # Запись в воронке повторок (этап «оплачено»)
+        rs = RepeatSession(
+            client_id=client.id,
+            stage=REPEAT_PAID,
+            payment_id=payment.id,
+        )
+        session.add(rs)
+        session.commit()
+        client_name = client.name or client.phone or f"клиент #{client.id}"
+
+    await call.message.edit_text(
+        (call.message.text or call.message.html_text or "")
+        + f"\n\n✅ Платёж записан как <b>повторка</b> от «{client_name}».",
+        parse_mode="HTML",
+    )
+    await call.answer("Записано")
+
+
+# ───────── repeat new (без лида, новый постоянник) ─────────
 
 @router.callback_query(F.data.startswith("pay:repeat_new:"))
 async def cb_repeat_new(call: CallbackQuery) -> None:
