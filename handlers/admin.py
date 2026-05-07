@@ -714,6 +714,83 @@ async def cmd_test_prodamus(message: Message) -> None:
         await message.answer(f"⚠ Ошибка теста: {e}")
 
 
+# ─── /setautoreply, /getautoreply ──────────────────────────────────
+
+@router.message(Command("getautoreply"))
+async def cmd_get_auto_reply(message: Message) -> None:
+    """Показывает текущий текст автоответа на новые заявки в Business-чатах."""
+    if not _is_owner(message):
+        return
+    current = os.environ.get("BUSINESS_AUTO_REPLY", "").strip()
+    if current:
+        await message.answer(
+            f"📣 <b>Текущий автоответ на новые заявки:</b>\n\n"
+            f"<i>{current}</i>\n\n"
+            "Поменять: <code>/setautoreply &lt;текст&gt;</code>\n"
+            "Выключить: <code>/setautoreply off</code>",
+            parse_mode="HTML",
+        )
+    else:
+        await message.answer(
+            "❌ Автоответ выключен.\n\n"
+            "Включить: <code>/setautoreply &lt;текст&gt;</code>\n"
+            "Например: <code>/setautoreply Здравствуйте! Спасибо за заявку, "
+            "скоро свяжусь с вами лично.</code>",
+            parse_mode="HTML",
+        )
+
+
+@router.message(Command("setautoreply"))
+async def cmd_set_auto_reply(message: Message, command: CommandObject) -> None:
+    """
+    Задаёт текст автоответа на первое сообщение нового лида в Telegram
+    Business. Для работы у бота должно быть разрешение «Ответы на
+    сообщения» в настройках Telegram Business.
+
+    /setautoreply Здравствуйте! …    — задать текст
+    /setautoreply off                — выключить автоответ
+    /getautoreply                    — показать текущий
+    """
+    if not _is_owner(message):
+        return
+    arg = (command.args or "").strip()
+    if not arg:
+        # Без аргументов — показываем текущий
+        await cmd_get_auto_reply(message)
+        return
+
+    if arg.lower() in ("off", "выкл", "выключить", "false", "—", "-"):
+        new_value = ""
+    else:
+        new_value = arg
+
+    os.environ["BUSINESS_AUTO_REPLY"] = new_value
+    persisted = _persist_env(ENV_FILE, "BUSINESS_AUTO_REPLY", new_value)
+
+    if persisted is not True:
+        await message.answer(
+            f"⚠ env обновил, но в .env записать не удалось ({persisted}).\n"
+            "После рестарта бота значение откатится."
+        )
+        return
+
+    if new_value:
+        await message.answer(
+            f"✅ <b>Автоответ обновлён.</b>\n\n"
+            f"<i>{new_value}</i>\n\n"
+            "Теперь каждый раз, когда новый клиент пишет с упоминанием "
+            "источника (insta/youtube/etc.), бот ответит ему этим текстом "
+            "от твоего имени.\n\n"
+            "⚠ Проверь, что у бота включено «Ответы на сообщения» "
+            "в настройках Telegram Business.",
+            parse_mode="HTML",
+        )
+    else:
+        await message.answer(
+            "✅ Автоответ выключен. Новые лиды получают только тебя самого, без бота."
+        )
+
+
 # ─── /admin (помощь) ───────────────────────────────────────────────
 
 @router.message(Command("admin"))
@@ -735,6 +812,9 @@ async def cmd_admin_help(message: Message) -> None:
         "и HSTS (если в браузере «Не защищено» с валидным сертификатом)\n"
         "<code>/diag</code> — диагностика состояния сервера "
         "(версии скриптов, sudo permissions, сертификаты)\n"
+        "<code>/setautoreply &lt;текст&gt;</code> — текст автоответа на новые "
+        "заявки в Telegram Business\n"
+        "<code>/getautoreply</code> — показать текущий автоответ\n"
         "<code>/deployurl</code> — показать URL для GitHub-вебхука "
         "(один раз настроишь — авто-деплой при push в main, /redeploy больше не нужен)",
         parse_mode="HTML",

@@ -139,6 +139,25 @@ async def on_business_message(message: Message) -> None:
         except Exception as e:
             log.warning("business notify failed: %s", e)
 
+        # Авто-ответ клиенту от имени владельца. Текст берём из env
+        # (BUSINESS_AUTO_REPLY); если переменная пустая — не отвечаем.
+        # Меняется через /setautoreply в админ-командах.
+        # Чтобы это работало, в Telegram Business у бота должно быть
+        # разрешение «Ответы на сообщения». Если нет — send упадёт с
+        # TelegramBadRequest и мы просто залогируем без падения хендлера.
+        import os
+        auto_reply = os.environ.get("BUSINESS_AUTO_REPLY", "").strip()
+        if auto_reply and message.business_connection_id:
+            try:
+                await message.bot.send_message(
+                    chat_id=user.id,
+                    business_connection_id=message.business_connection_id,
+                    text=auto_reply,
+                )
+                log.info("business: auto-reply sent to lead id=%s", lead_id)
+            except Exception as e:
+                log.warning("business auto-reply failed for lead %s: %s", lead_id, e)
+
     try:
         from sheets import sync_lead
         sync_lead(lead_id)
