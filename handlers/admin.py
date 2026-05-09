@@ -265,6 +265,34 @@ async def cmd_test_deploy(message: Message) -> None:
     else:
         lines.append("  (нет секрета для теста)")
 
+    # 5) Реальный публичный URL — точная реплика Actions (DNS, любой CF/CDN
+    #    в DNS, реальный TLS). Это последний шаг, чтобы понять режет ли
+    #    кто-то снаружи, до nginx.
+    lines.append("")
+    lines.append("<b>5) Через DNS+интернет (как Actions):</b>")
+    if https_secret:
+        try:
+            r = subprocess.run(
+                ["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}|%{remote_ip}",
+                 "--max-time", "10",
+                 f"https://dashboard.sharlovsky.pro/__deploy/{https_secret}"],
+                capture_output=True, text=True, timeout=15,
+            )
+            out = (r.stdout or "").strip()
+            stderr = (r.stderr or "").strip()
+            if "|" in out:
+                code, remote_ip = out.split("|", 1)
+            else:
+                code, remote_ip = out or "(empty)", ""
+            marker = "✅" if code == "200" else "❌"
+            lines.append(f"  {marker} GET <code>https://dashboard.sharlovsky.pro/__deploy/&lt;secret&gt;</code>")
+            lines.append(f"     HTTP <code>{code}</code>, remote IP: <code>{remote_ip or '?'}</code>")
+            if stderr and code != "200":
+                stderr_short = stderr[:200].replace("<", "&lt;").replace(">", "&gt;")
+                lines.append(f"     <i>stderr:</i> <code>{stderr_short}</code>")
+        except Exception as e:  # noqa: BLE001
+            lines.append(f"  ❌ ERR: <code>{str(e)[:120]}</code>")
+
     lines.extend([
         "",
         "<i>Расшифровка кодов:</i>",
@@ -272,6 +300,10 @@ async def cmd_test_deploy(message: Message) -> None:
         "❌ 401 — nginx 443-блок не знает <code>/__deploy/</code>, фолбэк на basic auth",
         "❌ 403 — listener получил запрос, но путь не совпал (trailing /, lf?)",
         "❌ 404 — listener другой секрет, либо location вернул not found",
+        "",
+        "<b>Если 4 (через 127.0.0.1) = 200, а 5 (через DNS) = 403</b> → "
+        "между интернетом и nginx стоит CF/CDN/firewall и он режет запрос. "
+        "Решение: в /deployurl выбрать вариант через прямой IP+HTTP.",
     ])
 
     await message.answer("\n".join(lines), parse_mode="HTML")
@@ -483,14 +515,39 @@ async def cmd_deploy_url(message: Message) -> None:
         base = "https://dashboard.sharlovsky.pro"
     url = f"{base}/__deploy/{secret}"
 
-    await message.answer(
+    # Альтернативный URL — напрямую через публичный IP по HTTP. Минует DNS,
+    # Cloudflare/CDN/WAF (если там что-то стоит) и попадает прямо в
+    # nginx default_server (порт 80, server_name `_`), у которого есть
+    # location /__deploy/. Использовать если основной URL ловит 403/blank.
+    pubip = ""
+    try:
+        r = subprocess.run(
+            ["curl", "-sS", "-4", "--max-time", "3", "ifconfig.me"],
+            capture_output=True, text=True, timeout=5,
+        )
+        pubip = r.stdout.strip()
+    except Exception:  # noqa: BLE001
+        pass
+    alt_url = f"http://{pubip}/__deploy/{secret}" if pubip else ""
+
+    text = (
         "🪝 <b>Авто-деплой при push в main</b>\n\n"
-        f"URL: <code>{url}</code>\n\n"
+        f"URL (через домен, HTTPS):\n<code>{url}</code>\n\n"
+    )
+    if alt_url:
+        text += (
+            f"⚙ <b>Альтернатива через прямой IP (HTTP)</b>:\n"
+            f"<code>{alt_url}</code>\n"
+            f"Использовать если основной URL ловит 403 — частая причина "
+            f"Cloudflare/CDN перед сервером, который не пускает Actions. "
+            f"IP-форма обходит DNS целиком.\n\n"
+        )
+    text += (
         "<b>Способ A — GitHub Actions (рекомендую)</b>\n"
         "1. https://github.com/vladislavsharlovskiy-ops/bot-metrics/settings/secrets/actions\n"
         "2. <b>New repository secret</b>\n"
         "3. Name: <code>DEPLOY_URL</code>\n"
-        "4. Value: вставить URL целиком (со скобками <code>https://…/__deploy/…</code>)\n"
+        "4. Value: один из URL выше (со скобками)\n"
         "5. Готово — workflow <code>.github/workflows/deploy.yml</code> сам "
         "будет дёргать его на каждом push в main.\n\n"
         "<b>Способ B — GitHub Webhook (альтернатива)</b>\n"
@@ -499,9 +556,9 @@ async def cmd_deploy_url(message: Message) -> None:
         "3. Payload URL: вставить URL\n"
         "4. Content type: <code>application/json</code>\n"
         "5. Events: Just the push event → <b>Add webhook</b>\n\n"
-        "Любой из способов — после настройки <code>/redeploy</code> больше не нужен.",
-        parse_mode="HTML",
+        "Любой из способов — после настройки <code>/redeploy</code> больше не нужен."
     )
+    await message.answer(text, parse_mode="HTML", disable_web_page_preview=True)
 
 
 # ─── /version ──────────────────────────────────────────────────────
