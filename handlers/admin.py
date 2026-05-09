@@ -226,30 +226,40 @@ async def cmd_test_deploy(message: Message) -> None:
     else:
         lines.extend(test_results)
 
-    # 4) POST через HTTPS-nginx (как делает GitHub Actions). Используем
+    # 4) POST/GET через HTTPS-nginx (как делает GitHub Actions). Используем
     #    Host: header чтобы попасть на правильный server-блок и -k чтобы
     #    закрыть глаза на self-signed (мы и так знаем кто отвечает).
     https_results: list[str] = []
     https_secret = (file_secrets[-1] if file_secrets else env_secret)
     if https_secret:
-        for label, suffix in [("без trailing /", ""), ("с trailing /", "/")]:
+        tests = [
+            ("GET без /",   "GET",  ""),
+            ("GET с /",     "GET",  "/"),
+            ("POST без /",  "POST", ""),
+            ("POST с /",    "POST", "/"),
+        ]
+        for label, method, suffix in tests:
             try:
                 r = subprocess.run(
                     ["curl", "-sS", "-k", "-o", "/dev/null", "-w", "%{http_code}",
                      "--max-time", "5",
-                     "-X", "POST",
+                     "-X", method,
                      "-H", "Host: dashboard.sharlovsky.pro",
                      f"https://127.0.0.1/__deploy/{https_secret}{suffix}"],
                     capture_output=True, text=True, timeout=10,
                 )
-                code = r.stdout.strip() or "?"
+                code = r.stdout.strip() or "(empty)"
+                stderr = (r.stderr or "").strip().replace("<", "&lt;").replace(">", "&gt;")
+                stderr_short = stderr[:120]
             except Exception as e:  # noqa: BLE001
-                code = f"ERR ({e!s:.40})"
+                code = "ERR"
+                stderr_short = str(e)[:120]
             marker = "✅" if code == "200" else "❌"
-            https_results.append(f"  {marker} POST {label}: HTTP <code>{code}</code>")
+            err_part = f"\n     <i>stderr:</i> <code>{stderr_short}</code>" if stderr_short and code != "200" else ""
+            https_results.append(f"  {marker} {label}: HTTP <code>{code}</code>{err_part}")
 
     lines.append("")
-    lines.append("<b>4) POST через HTTPS+nginx (как Actions):</b>")
+    lines.append("<b>4) Через HTTPS+nginx (как Actions):</b>")
     if https_secret:
         lines.extend(https_results)
     else:
@@ -265,6 +275,36 @@ async def cmd_test_deploy(message: Message) -> None:
     ])
 
     await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+# ─── /diag_nginx ───────────────────────────────────────────────────
+#
+# Дампит /etc/nginx/sites-available/bot-metrics.conf чанками по 3500 chars,
+# чтобы не упереться в 4096-лимит TG-сообщения (у /diag это и происходит,
+# поэтому 443-блок до владельца не доезжает). Нужен один раз чтобы
+# понять, есть ли там location /__deploy/ и куда он проксирует.
+
+@router.message(Command("diag_nginx"))
+async def cmd_diag_nginx(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    nginx_conf = Path("/etc/nginx/sites-available/bot-metrics.conf")
+    try:
+        content = nginx_conf.read_text(encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        await message.answer(f"⚠ Не могу прочитать {nginx_conf}: <code>{e!s}</code>", parse_mode="HTML")
+        return
+    chunk_size = 3500
+    parts = [content[i:i + chunk_size] for i in range(0, len(content), chunk_size)]
+    if not parts:
+        await message.answer("⚠ Файл пустой", parse_mode="HTML")
+        return
+    for i, chunk in enumerate(parts, 1):
+        escaped = chunk.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        await message.answer(
+            f"<b>📄 nginx-conf {i}/{len(parts)}</b> ({len(chunk)} chars)\n<pre>{escaped}</pre>",
+            parse_mode="HTML",
+        )
 
 
 # ─── /restart_listener ─────────────────────────────────────────────
