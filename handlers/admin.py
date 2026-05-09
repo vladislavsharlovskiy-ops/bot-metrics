@@ -220,15 +220,49 @@ async def cmd_test_deploy(message: Message) -> None:
             lines.append(f"  ⚠ <b>дублей: {len(file_secrets)}</b> — systemd возьмёт ПОСЛЕДНЮЮ")
 
     lines.append("")
-    lines.append("<b>3) GET на listener (127.0.0.1:9876):</b>")
+    lines.append("<b>3) GET напрямую на listener (127.0.0.1:9876):</b>")
     if not candidates:
         lines.append("  (нечего тестировать — секрет нигде не нашёлся)")
     else:
         lines.extend(test_results)
-        lines.append("")
-        lines.append("✅ 200 — listener знает этот секрет (и /deployurl с ним совпадает)")
-        lines.append("❌ 404 — listener держит ДРУГОЙ секрет (нужен /restart_listener)")
-        lines.append("❌ ERR/curl: connection refused — listener не запущен")
+
+    # 4) POST через HTTPS-nginx (как делает GitHub Actions). Используем
+    #    Host: header чтобы попасть на правильный server-блок и -k чтобы
+    #    закрыть глаза на self-signed (мы и так знаем кто отвечает).
+    https_results: list[str] = []
+    https_secret = (file_secrets[-1] if file_secrets else env_secret)
+    if https_secret:
+        for label, suffix in [("без trailing /", ""), ("с trailing /", "/")]:
+            try:
+                r = subprocess.run(
+                    ["curl", "-sS", "-k", "-o", "/dev/null", "-w", "%{http_code}",
+                     "--max-time", "5",
+                     "-X", "POST",
+                     "-H", "Host: dashboard.sharlovsky.pro",
+                     f"https://127.0.0.1/__deploy/{https_secret}{suffix}"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                code = r.stdout.strip() or "?"
+            except Exception as e:  # noqa: BLE001
+                code = f"ERR ({e!s:.40})"
+            marker = "✅" if code == "200" else "❌"
+            https_results.append(f"  {marker} POST {label}: HTTP <code>{code}</code>")
+
+    lines.append("")
+    lines.append("<b>4) POST через HTTPS+nginx (как Actions):</b>")
+    if https_secret:
+        lines.extend(https_results)
+    else:
+        lines.append("  (нет секрета для теста)")
+
+    lines.extend([
+        "",
+        "<i>Расшифровка кодов:</i>",
+        "✅ 200 — всё ок",
+        "❌ 401 — nginx 443-блок не знает <code>/__deploy/</code>, фолбэк на basic auth",
+        "❌ 403 — listener получил запрос, но путь не совпал (trailing /, lf?)",
+        "❌ 404 — listener другой секрет, либо location вернул not found",
+    ])
 
     await message.answer("\n".join(lines), parse_mode="HTML")
 
