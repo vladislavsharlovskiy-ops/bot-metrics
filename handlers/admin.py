@@ -923,6 +923,86 @@ async def cmd_diag_clients(message: Message) -> None:
     await message.answer(text[:4000], parse_mode="HTML")
 
 
+# ─── /diag_backup ──────────────────────────────────────────────────
+
+@router.message(Command("diag_backup"))
+async def cmd_diag_backup(message: Message) -> None:
+    """Read-only диагностика подсистемы бэкапа: cron-расписание, лог
+    последних запусков, локальные файлы. Чтобы понять, почему ожидаемый
+    еженедельный бэкап не приходит в TG.
+    """
+    if not _is_owner(message):
+        return
+
+    lines: list[str] = ["🔍 <b>Диагностика бэкапов</b>\n"]
+
+    # 1. Существует ли скрипт по ожидаемому пути
+    if os.path.exists(BACKUP_SCRIPT):
+        executable = os.access(BACKUP_SCRIPT, os.X_OK)
+        lines.append(
+            f"📜 <code>{BACKUP_SCRIPT}</code>: ✅ есть, "
+            f"{'исполняемый ✅' if executable else 'НЕ исполняемый ❌'}"
+        )
+    else:
+        lines.append(f"📜 <code>{BACKUP_SCRIPT}</code>: ❌ нет — install.sh не отрабатывал?")
+
+    # 2. Crontab сервисного юзера. Бот сам в нём же — должен прочитать.
+    try:
+        ct = subprocess.run(
+            ["crontab", "-l"], capture_output=True, text=True, timeout=5,
+        )
+        if ct.returncode == 0:
+            backup_lines = [
+                l for l in ct.stdout.splitlines() if "backup.sh" in l
+            ]
+            if backup_lines:
+                lines.append("📅 <b>Cron-запись о бэкапе:</b>")
+                for l in backup_lines:
+                    lines.append(f"  <code>{l}</code>")
+            else:
+                lines.append("📅 Cron-запись о бэкапе: ❌ <b>НЕТ</b> — поэтому и не запускается. Нужно <code>/redeploy</code> (deploy.sh её ставит).")
+        else:
+            lines.append(f"📅 crontab -l: stderr=<code>{ct.stderr.strip()[:200]}</code>")
+    except Exception as e:
+        lines.append(f"📅 crontab -l: ⚠ {e}")
+
+    # 3. Лог последних запусков бэкапа
+    log_path = "/opt/bot-metrics/logs/backup.log"
+    if os.path.exists(log_path):
+        try:
+            tail = subprocess.run(
+                ["tail", "-30", log_path], capture_output=True, text=True, timeout=5,
+            ).stdout
+            if tail.strip():
+                lines.append(f"\n📓 <b>{log_path}</b> (последние 30 строк):\n<pre>{tail[:1500]}</pre>")
+            else:
+                lines.append(f"\n📓 <code>{log_path}</code>: пустой — cron бэкап ни разу не запускался")
+        except Exception as e:
+            lines.append(f"\n📓 backup.log: ⚠ {e}")
+    else:
+        lines.append(f"\n📓 <code>{log_path}</code>: ❌ нет — cron-запуска не было ни одного")
+
+    # 4. Локальные файлы бэкапа (хранится 7 последних)
+    backups_dir = "/opt/bot-metrics/data/backups"
+    if os.path.isdir(backups_dir):
+        try:
+            ls = subprocess.run(
+                ["ls", "-lht", backups_dir], capture_output=True, text=True, timeout=5,
+            ).stdout
+            head_lines = ls.splitlines()[:10]
+            lines.append(
+                f"\n📦 <b>Локальные бэкапы в {backups_dir}:</b>\n"
+                f"<pre>{chr(10).join(head_lines)[:1500]}</pre>"
+            )
+        except Exception as e:
+            lines.append(f"\n📦 ls backups: ⚠ {e}")
+    else:
+        lines.append(f"\n📦 <code>{backups_dir}</code>: ❌ нет директории")
+
+    text = "\n".join(lines)[:4000]
+    await message.answer(text, parse_mode="HTML")
+
+
 # ─── /recent_payments ──────────────────────────────────────────────
 
 @router.message(Command("recent_payments"))
@@ -1051,6 +1131,8 @@ async def cmd_admin_help(message: Message) -> None:
         "<code>/setautoreply &lt;текст&gt;</code> — текст автоответа на новые "
         "заявки в Telegram Business\n"
         "<code>/getautoreply</code> — показать текущий автоответ\n"
+        "<code>/diag_backup</code> — read-only: почему еженедельный "
+        "бэкап не приходит (есть ли cron-запись, что в backup.log)\n"
         "<code>/recent_payments [N]</code> — список последних N платежей "
         "(unclassified / first / repeat / ignored), чтобы найти потерявшийся\n"
         "<code>/reclassify ID</code> — сбросить классификацию платежа и "
