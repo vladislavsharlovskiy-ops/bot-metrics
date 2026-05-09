@@ -271,7 +271,15 @@ async def cb_first_new_with_source(call: CallbackQuery) -> None:
 
 @router.message(Command("fixpay"))
 async def cmd_fixpay(message: Message, bot: Bot) -> None:
-    """Найти последний платёж-сироту, найти кандидатов-лидов, предложить привязку."""
+    """Найти последний платёж-сироту и предложить классификацию.
+
+    Раньше тут была своя редуцированная UI с двумя кнопками («Новый клиент»
+    и «Игнор»), которая не позволяла отметить сироту как «постоянник» —
+    приходилось делать обход через /reclassify. Теперь делегируем тот же
+    диалог, что webhook шлёт при поступлении нового платежа: с поиском
+    и по клиентам (постоянники), и по лидам, и со всеми кнопками включая
+    «🔁 Новый постоянник».
+    """
     if message.from_user and message.from_user.id != OWNER_ID:
         return
     with get_session() as session:
@@ -285,58 +293,15 @@ async def cmd_fixpay(message: Message, bot: Bot) -> None:
         if not payment:
             await message.answer("Нет платежей-сирот: все первички привязаны к лидам ✨")
             return
-        pid = payment.id
-        amount = _money(payment)
-        who = payment.customer_name or payment.customer_phone or payment.customer_email or "—"
-        product = payment.product or "—"
-        paid_at = payment.paid_at.strftime("%d.%m.%Y %H:%M") if payment.paid_at else "—"
 
-        candidates = _match_lead_candidates(
-            session,
-            payment.customer_name,
-            payment.customer_phone,
-            payment.customer_email,
+        from webhook import _match_clients, _match_leads, _notify_classify
+        client_candidates = _match_clients(
+            session, payment.customer_name, payment.customer_phone, payment.customer_email,
         )
-
-    text_lines = [
-        "🛠 <b>Платёж-сирота</b>",
-        "",
-        f"💰 {amount}",
-        f"👤 {who}",
-        f"🛍 {product}",
-        f"🕒 {paid_at}",
-    ]
-
-    rows: list[list[InlineKeyboardButton]] = []
-    if candidates:
-        text_lines.append("")
-        text_lines.append("🔍 <b>Возможные совпадения с лидами:</b>")
-        for lead in candidates:
-            text_lines.append(f"• #{lead.id} «{lead.name or lead.username}» — {lead.source}")
-            rows.append([InlineKeyboardButton(
-                text=_lead_button_label(lead),
-                callback_data=f"pay:first_lead:{pid}:{lead.id}",
-            )])
-        text_lines.append("")
-        text_lines.append("Если это новый клиент — нажми «Новый клиент».")
-    else:
-        text_lines.append("")
-        text_lines.append("❓ Совпадений с лидами не найдено.")
-
-    rows.append([InlineKeyboardButton(
-        text="➕ Новый клиент (выбрать источник)",
-        callback_data=f"pay:first_new:{pid}",
-    )])
-    rows.append([InlineKeyboardButton(
-        text="🚫 Игнорировать платёж",
-        callback_data=f"pay:ignore:{pid}",
-    )])
-
-    await message.answer(
-        "\n".join(text_lines),
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
-    )
+        lead_candidates = _match_leads(
+            session, payment.customer_name, payment.customer_phone, payment.customer_email,
+        )
+        _notify_classify(payment, lead_candidates, client_candidates)
 
 
 # ───────── repeat: к существующему клиенту ─────────
