@@ -32,15 +32,21 @@ def _read_deploy_secret() -> str:
     Re-read дёшев (одна-две сотни байт на запрос), зато развязывает
     рестарт-зависимость и /deployurl всегда показывает то, что listener
     реально проверяет.
+
+    Если в .env вдруг несколько строк DEPLOY_SECRET= (приклеилось install.sh'ем
+    второй раз) — берём ПОСЛЕДНЮЮ. Это совпадает с поведением systemd
+    EnvironmentFile, который для дублей берёт last-wins. Иначе бот через
+    os.environ возвращал бы одно значение, а listener — другое.
     """
+    secret = ""
     try:
         with open(ENV_FILE, encoding="utf-8") as f:
             for line in f:
                 if line.startswith("DEPLOY_SECRET="):
-                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+                    secret = line.split("=", 1)[1].strip().strip('"').strip("'")
     except OSError:
         pass
-    return os.environ.get("DEPLOY_SECRET", "").strip()
+    return secret or os.environ.get("DEPLOY_SECRET", "").strip()
 
 
 if not _read_deploy_secret():

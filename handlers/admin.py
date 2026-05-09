@@ -144,6 +144,95 @@ def _sync_bin_from_repo() -> list[str]:
     return synced
 
 
+# ─── /test_deploy ──────────────────────────────────────────────────
+#
+# Диагностика: куда именно теряется DEPLOY_SECRET. Делает три проверки:
+#   1) os.environ.get('DEPLOY_SECRET') — что сейчас в env у бота (то, что
+#      печатает /deployurl и что должно совпадать с GitHub-секретом).
+#   2) Все строки DEPLOY_SECRET= в .env файле (если их несколько — мы их
+#      найдём и поймём, какой systemd считает «настоящим»).
+#   3) GET на http://127.0.0.1:9876/__deploy/<secret> — если listener вернёт
+#      200, значит секрет матчится у него в памяти. Если 404 — значит
+#      listener держит другой секрет (мой re-read фикс не сработал, либо
+#      сервис не рестартанули). Если timeout/connection refused — listener
+#      не запущен.
+
+@router.message(Command("test_deploy"))
+async def cmd_test_deploy(message: Message) -> None:
+    if not _is_owner(message):
+        return
+
+    env_secret = os.environ.get("DEPLOY_SECRET", "").strip()
+
+    file_secrets: list[str] = []
+    try:
+        with open(ENV_FILE, encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("DEPLOY_SECRET="):
+                    file_secrets.append(line.split("=", 1)[1].strip().strip('"').strip("'"))
+        file_err = ""
+    except Exception as e:  # noqa: BLE001
+        file_err = str(e)
+
+    candidates: list[tuple[str, str]] = []
+    if env_secret:
+        candidates.append(("os.environ", env_secret))
+    for i, s in enumerate(file_secrets):
+        candidates.append((f".env line #{i+1}", s))
+
+    test_results: list[str] = []
+    for label, secret in candidates:
+        try:
+            r = subprocess.run(
+                ["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}",
+                 "--max-time", "5",
+                 f"http://127.0.0.1:9876/__deploy/{secret}"],
+                capture_output=True, text=True, timeout=10,
+            )
+            code = r.stdout.strip() or "?"
+            err = (r.stderr or "").strip()[:80]
+        except Exception as e:  # noqa: BLE001
+            code = "ERR"
+            err = str(e)[:80]
+        suffix = f" — <code>{err}</code>" if err else ""
+        marker = "✅" if code == "200" else "❌"
+        test_results.append(f"  {marker} {label}: HTTP <code>{code}</code>{suffix}")
+
+    def short(s: str) -> str:
+        return f"{s[:8]}…{s[-4:]} (len={len(s)})" if len(s) > 12 else f"{s} (len={len(s)})"
+
+    lines = [
+        "🔬 <b>Self-test deploy listener</b>",
+        "",
+        f"<b>1) os.environ.get('DEPLOY_SECRET'):</b>",
+        f"  <code>{short(env_secret) if env_secret else '(пусто)'}</code>",
+        "",
+        f"<b>2) Строки DEPLOY_SECRET= в {ENV_FILE}:</b>",
+    ]
+    if file_err:
+        lines.append(f"  ⚠ ошибка чтения: <code>{file_err}</code>")
+    elif not file_secrets:
+        lines.append("  (не найдено)")
+    else:
+        for i, s in enumerate(file_secrets, 1):
+            lines.append(f"  #{i}: <code>{short(s)}</code>")
+        if len(file_secrets) > 1:
+            lines.append(f"  ⚠ <b>дублей: {len(file_secrets)}</b> — systemd возьмёт ПОСЛЕДНЮЮ")
+
+    lines.append("")
+    lines.append("<b>3) GET на listener (127.0.0.1:9876):</b>")
+    if not candidates:
+        lines.append("  (нечего тестировать — секрет нигде не нашёлся)")
+    else:
+        lines.extend(test_results)
+        lines.append("")
+        lines.append("✅ 200 — listener знает этот секрет (и /deployurl с ним совпадает)")
+        lines.append("❌ 404 — listener держит ДРУГОЙ секрет (нужен /restart_listener)")
+        lines.append("❌ ERR/curl: connection refused — listener не запущен")
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
+
+
 # ─── /restart_listener ─────────────────────────────────────────────
 #
 # Перезапускает сервис bot-metrics-deploy.service. deploy.sh специально его
@@ -1226,6 +1315,8 @@ async def cmd_admin_help(message: Message) -> None:
         "скриптов в bin/ (быстрая проверка, доехал ли свежий фикс)\n"
         "<code>/restart_listener</code> — рестарт сервиса auto-deploy "
         "(нужен один раз когда обновился deploy_listener.py или менялся "
-        "DEPLOY_SECRET в .env)",
+        "DEPLOY_SECRET в .env)\n"
+        "<code>/test_deploy</code> — диагностика: совпадает ли DEPLOY_SECRET "
+        "у бота и у listener'а, через self-curl на 127.0.0.1:9876",
         parse_mode="HTML",
     )
