@@ -724,7 +724,8 @@ async def cb_delete_confirm(call: CallbackQuery) -> None:
             await call.answer("Лид уже удалён", show_alert=True)
             return
         title = lead.name or lead.username or f"#{lead.id}"
-        session.delete(lead)
+        from lead_ops import delete_lead_cascade
+        delete_lead_cascade(session, lead)
         session.commit()
     await call.message.edit_text(f"🗑 Лид <b>{title}</b> удалён.")
     await call.answer("Удалено")

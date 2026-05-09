@@ -24,11 +24,11 @@ from pathlib import Path
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
-from sqlalchemy import select
+from sqlalchemy import delete as sql_delete, select
 
 from config import OWNER_ID
 from db import get_session
-from models import Payment
+from models import Client, Payment
 
 log = logging.getLogger("admin")
 router = Router(name="admin")
@@ -791,6 +791,62 @@ async def cmd_set_auto_reply(message: Message, command: CommandObject) -> None:
         )
 
 
+# ─── /purge_orphans ────────────────────────────────────────────────
+
+@router.message(Command("purge_orphans"))
+async def cmd_purge_orphans(message: Message) -> None:
+    """Подчистить осиротевшие Clients/Payments после удалений лидов
+    до cascade-delete фикса.
+
+    Два кейса:
+    1. Client с lead_id IS NULL — originating-лид удалили, но Client
+       остался (FK ondelete=SET NULL). ORM-delete + cascade='all,
+       delete-orphan' стирают его Payments и RepeatSessions.
+    2. Payment с lead_id IS NULL И client_id IS NULL И payment_type
+       IN ('first','repeat') — «дважды осиротевший»: и лид, и клиент
+       уже удалены, но классифицированный платёж остался и попадает
+       в карточку «Первичных оплат» на дашборде. Платежи с
+       payment_type='unclassified' не трогаем — это нормальное
+       состояние свежего webhook'а, ждущего ручной классификации.
+    """
+    if not _is_owner(message):
+        return
+    with get_session() as session:
+        orphan_clients = session.execute(
+            select(Client).where(Client.lead_id.is_(None))
+        ).scalars().all()
+        client_count = len(orphan_clients)
+        payments_via_client = sum(len(c.payments) for c in orphan_clients)
+        sessions_via_client = sum(len(c.sessions) for c in orphan_clients)
+        for c in orphan_clients:
+            session.delete(c)
+
+        result = session.execute(
+            sql_delete(Payment)
+            .where(Payment.lead_id.is_(None))
+            .where(Payment.client_id.is_(None))
+            .where(Payment.payment_type.in_(("first", "repeat")))
+        )
+        bare_payments = result.rowcount or 0
+        session.commit()
+
+    total = client_count + payments_via_client + sessions_via_client + bare_payments
+    if total == 0:
+        await message.answer(
+            "🧹 Ничего лишнего не нашёл — БД чистая.",
+            parse_mode="HTML",
+        )
+        return
+    await message.answer(
+        f"🧹 Подчистили:\n"
+        f"• клиентов без лида: {client_count}\n"
+        f"• их платежей: {payments_via_client}\n"
+        f"• их сессий повтора: {sessions_via_client}\n"
+        f"• одиночных «осиротевших» платежей: {bare_payments}",
+        parse_mode="HTML",
+    )
+
+
 # ─── /admin (помощь) ───────────────────────────────────────────────
 
 @router.message(Command("admin"))
@@ -815,6 +871,8 @@ async def cmd_admin_help(message: Message) -> None:
         "<code>/setautoreply &lt;текст&gt;</code> — текст автоответа на новые "
         "заявки в Telegram Business\n"
         "<code>/getautoreply</code> — показать текущий автоответ\n"
+        "<code>/purge_orphans</code> — подчистить «осиротевшие» Clients/"
+        "Payments после удалений лидов до cascade-delete фикса\n"
         "<code>/deployurl</code> — показать URL для GitHub-вебхука "
         "(один раз настроишь — авто-деплой при push в main, /redeploy больше не нужен)",
         parse_mode="HTML",

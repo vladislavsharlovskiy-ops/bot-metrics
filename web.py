@@ -565,7 +565,8 @@ def api_delete(lead_id: int):
         lead = session.get(Lead, lead_id)
         if not lead:
             return jsonify({"error": "not found"}), 404
-        session.delete(lead)
+        from lead_ops import delete_lead_cascade
+        delete_lead_cascade(session, lead)
         session.commit()
     return jsonify({"ok": True, "id": lead_id})
 
