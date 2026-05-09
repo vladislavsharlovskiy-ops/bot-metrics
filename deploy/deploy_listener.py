@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import unquote
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("deploy-listener")
@@ -54,6 +55,24 @@ if not _read_deploy_secret():
     sys.exit(1)
 
 
+def _path_matches(path: str, secret: str) -> bool:
+    """Толерантное сравнение пути с ожидаемым /__deploy/<secret>.
+
+    Учитывает частые источники рассинхрона:
+    - trailing slash (если в DEPLOY_URL secret кто-то приклеил `/` в конце)
+    - URL-encoded символы (CR/LF превращается в %0A — частый артефакт
+      копи-пасты из веб-форм)
+    - leading/trailing whitespace в самом self.path
+
+    Раньше был строгий != сравнение, и если в GitHub-секрете оказывался
+    trailing slash или невидимый перевод строки — listener возвращал 403
+    forbidden навсегда, а из логов не было понятно почему.
+    """
+    cleaned = unquote(path or "").strip().rstrip("/")
+    expected = f"/__deploy/{secret}".rstrip("/")
+    return cleaned == expected
+
+
 class Handler(BaseHTTPRequestHandler):
     def _reply(self, code: int, msg: str) -> None:
         self.send_response(code)
@@ -64,13 +83,22 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         # GitHub при создании вебхука сначала шлёт ping (с GET для health).
         # Возвращаем 200, чтобы зелёная галочка появилась.
-        if self.path == f"/__deploy/{_read_deploy_secret()}":
+        if _path_matches(self.path, _read_deploy_secret()):
             self._reply(200, "deploy-listener ok\n")
         else:
             self._reply(404, "not found\n")
 
     def do_POST(self) -> None:
-        if self.path != f"/__deploy/{_read_deploy_secret()}":
+        secret = _read_deploy_secret()
+        if not _path_matches(self.path, secret):
+            # Логируем мисматч (без полного секрета — только длину
+            # ожидаемого, чтобы из journalctl можно было понять КАК именно
+            # клиент промахнулся: trailing slash, левый префикс, опечатка).
+            cleaned = unquote(self.path or "").strip().rstrip("/")
+            log.warning(
+                "POST 403: cleaned-path=%r expected-prefix=%r expected-secret-len=%d",
+                cleaned, "/__deploy/", len(secret),
+            )
             self._reply(403, "forbidden\n")
             return
         # Читаем тело и выбрасываем — нам важен только факт пуша
