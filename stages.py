@@ -9,6 +9,7 @@ AGREED = "agreed"
 PAID = "paid"
 CONSULTED = "consulted"
 PACKAGE_BOUGHT = "package_bought"
+PACKAGE_DECLINED = "package_declined"
 LOST = "lost"
 IGNORING = "ignoring"
 
@@ -57,8 +58,16 @@ _AGREED_STAGE = Stage(AGREED, "Согласие на консультацию", 
 
 LOST_STAGE = Stage(LOST, "Лид отвалился", "Отвал")
 IGNORING_STAGE = Stage(IGNORING, "Игнорит", "Игнор")
+# package_declined — клиент после консультации, пакет не купил.
+# Не входит в CLIENT_CODES (выпадает из вкладки «Клиенты»),
+# не входит в FUNNEL (не отрисовывается в воронке как этап).
+# Исторически Payment остаётся, выручка считается. Чтобы вернуть
+# в работу, на карточке появляется кнопка «Купил пакет» (advance).
+PACKAGE_DECLINED_STAGE = Stage(PACKAGE_DECLINED, "Без пакета", "Без пакета")
 
-BY_CODE: dict[str, Stage] = {s.code: s for s in [*FUNNEL, _AGREED_STAGE, LOST_STAGE, IGNORING_STAGE]}
+BY_CODE: dict[str, Stage] = {
+    s.code: s for s in [*FUNNEL, _AGREED_STAGE, LOST_STAGE, IGNORING_STAGE, PACKAGE_DECLINED_STAGE]
+}
 
 # Активные = лиды, которые ещё не оплатили. AGREED оставлен для обратной
 # совместимости с существующими лидами на этом этапе.
@@ -69,11 +78,17 @@ IGNORING_CODES = {IGNORING}
 
 
 def next_stage(current: str) -> Stage | None:
-    """Следующий этап в воронке. Special-case AGREED → PAID, потому что
-    AGREED убран из FUNNEL list, но существующие лиды на нём должны
-    нормально продвигаться по /advance."""
+    """Следующий этап в воронке. Special-cases:
+    - AGREED → PAID: AGREED убран из FUNNEL list, но лиды на нём
+      должны продвигаться по /advance.
+    - PACKAGE_DECLINED → PACKAGE_BOUGHT: если клиент после «Без пакета»
+      всё-таки купил пакет, кнопка «Дальше» в карточке отправит его
+      в PACKAGE_BOUGHT, и он снова попадёт во вкладку «Клиенты».
+    """
     if current == AGREED:
         return BY_CODE[PAID]
+    if current == PACKAGE_DECLINED:
+        return BY_CODE[PACKAGE_BOUGHT]
     for i, s in enumerate(FUNNEL):
         if s.code == current and i + 1 < len(FUNNEL):
             return FUNNEL[i + 1]

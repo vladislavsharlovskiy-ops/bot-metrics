@@ -203,6 +203,7 @@
         <button @click="setStatus('clients')"  :class="leadFilter==='clients'  ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">💚 Клиенты</button>
         <button @click="setStatus('ignoring')" :class="leadFilter==='ignoring' ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">🤐 Игнорят</button>
         <button @click="setStatus('lost')"     :class="leadFilter==='lost'     ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">Отвалы</button>
+        <button @click="setStatus('declined')" :class="leadFilter==='declined' ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">📦 Без пакета</button>
         <button @click="setStatus('all')"      :class="leadFilter==='all'      ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">Все</button>
       </div>
       <input type="search" x-model.debounce.300ms="searchQuery" @input="loadLeads()" placeholder="Поиск…" class="w-full sm:flex-1 sm:min-w-[260px] px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"/>
@@ -317,8 +318,11 @@
           <button x-show="selectedLead.is_active" @click="markLost()" class="w-full px-4 py-3 bg-white border border-red-200 text-red-700 hover:bg-red-50 rounded-lg font-medium">
             ❌ Лид отвалился
           </button>
+          <button x-show="selectedLead.is_consulted" @click="declinePackage()" class="w-full px-4 py-3 bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 rounded-lg font-medium">
+            📦 Без пакета (в архив)
+          </button>
           <button x-show="selectedLead.is_lost" @click="revive()" class="w-full px-4 py-3 bg-white border border-blue-200 text-blue-700 hover:bg-blue-50 rounded-lg font-medium">
-            ↩︎ Вернуть в работу (Квал)
+            ↩︎ Вернуть в работу
           </button>
           <button @click="deleteLead()" class="w-full px-4 py-2 mt-2 text-slate-500 hover:text-red-700 text-sm font-medium">
             🗑 Удалить лид навсегда
@@ -618,6 +622,13 @@ function dash() {
 
     async revive() {
       const r = await fetch('/api/leads/' + this.selectedLead.id + '/revive', { method: 'POST' });
+      const d = await r.json();
+      if (d.lead) { this.selectedLead = d.lead; }
+      await this.refreshAll();
+    },
+
+    async declinePackage() {
+      const r = await fetch('/api/leads/' + this.selectedLead.id + '/decline_package', { method: 'POST' });
       const d = await r.json();
       if (d.lead) { this.selectedLead = d.lead; }
       await this.refreshAll();
