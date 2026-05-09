@@ -28,7 +28,7 @@ from sqlalchemy import select
 
 from config import OWNER_ID
 from db import get_session
-from models import Payment
+from models import Client, Payment
 
 log = logging.getLogger("admin")
 router = Router(name="admin")
@@ -791,6 +791,42 @@ async def cmd_set_auto_reply(message: Message, command: CommandObject) -> None:
         )
 
 
+# ─── /purge_orphans ────────────────────────────────────────────────
+
+@router.message(Command("purge_orphans"))
+async def cmd_purge_orphans(message: Message) -> None:
+    """Подчистить осиротевшие Clients (lead_id IS NULL) и их Payments.
+
+    Нужно один раз после деплоя cascade-delete фикса: до него удаление
+    лида оставляло связанные Client и Payment в БД (FK ondelete=SET
+    NULL), и дашборд продолжал их учитывать. После выполнения:
+    Client с lead_id IS NULL удаляются ORM-delete-ом, через cascade
+    'all, delete-orphan' автоматически чистятся их Payments и
+    RepeatSessions. Платежи, которые ещё не классифицированы (lead_id
+    и client_id оба NULL, но это нормальное состояние unclassified) —
+    не трогаем.
+    """
+    if not _is_owner(message):
+        return
+    with get_session() as session:
+        orphan_clients = session.execute(
+            select(Client).where(Client.lead_id.is_(None))
+        ).scalars().all()
+        client_count = len(orphan_clients)
+        payment_count = sum(len(c.payments) for c in orphan_clients)
+        session_count = sum(len(c.sessions) for c in orphan_clients)
+        for c in orphan_clients:
+            session.delete(c)
+        session.commit()
+    await message.answer(
+        f"🧹 Подчистили:\n"
+        f"• клиентов: {client_count}\n"
+        f"• платежей: {payment_count}\n"
+        f"• сессий повтора: {session_count}",
+        parse_mode="HTML",
+    )
+
+
 # ─── /admin (помощь) ───────────────────────────────────────────────
 
 @router.message(Command("admin"))
@@ -815,6 +851,8 @@ async def cmd_admin_help(message: Message) -> None:
         "<code>/setautoreply &lt;текст&gt;</code> — текст автоответа на новые "
         "заявки в Telegram Business\n"
         "<code>/getautoreply</code> — показать текущий автоответ\n"
+        "<code>/purge_orphans</code> — подчистить «осиротевшие» Clients/"
+        "Payments после удалений лидов до cascade-delete фикса\n"
         "<code>/deployurl</code> — показать URL для GitHub-вебхука "
         "(один раз настроишь — авто-деплой при push в main, /redeploy больше не нужен)",
         parse_mode="HTML",
