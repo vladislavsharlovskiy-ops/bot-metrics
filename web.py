@@ -573,14 +573,30 @@ def api_delete(lead_id: int):
 
 @app.post("/api/leads/<int:lead_id>/revive")
 def api_revive(lead_id: int):
-    """Move a lost lead back to qualified."""
+    """Возвращает LOST-лид в его предыдущий этап по StageHistory.
+
+    Раньше всегда ставил qualified — но если у лида была оплата (он был
+    в PAID и потом ошибочно переведён в LOST), приходилось 3 раза жать
+    «Дальше», и в funnel-метриках появлялся лишний путь qualified→…→paid.
+    Теперь возвращаем в последний non-LOST этап из истории — поведение
+    симметрично api_unignore. Если истории нет — fallback в qualified
+    (старое поведение).
+    """
     with get_session() as session:
         lead = session.get(Lead, lead_id)
         if not lead:
             return jsonify({"error": "not found"}), 404
-        lead.stage = "qualified"
+        prev = session.execute(
+            select(StageHistory)
+            .where(StageHistory.lead_id == lead_id)
+            .where(StageHistory.stage != LOST)
+            .order_by(StageHistory.changed_at.desc())
+            .limit(1)
+        ).scalars().first()
+        target = prev.stage if prev else "qualified"
+        lead.stage = target
         lead.lost_reason = None
-        session.add(StageHistory(lead_id=lead.id, stage="qualified"))
+        session.add(StageHistory(lead_id=lead.id, stage=target))
         session.commit()
         session.refresh(lead)
     _try_sheets_sync(lead_id)
