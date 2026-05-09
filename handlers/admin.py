@@ -923,6 +923,110 @@ async def cmd_diag_clients(message: Message) -> None:
     await message.answer(text[:4000], parse_mode="HTML")
 
 
+# ─── /recent_payments ──────────────────────────────────────────────
+
+@router.message(Command("recent_payments"))
+async def cmd_recent_payments(message: Message, command: CommandObject) -> None:
+    """Показать последние N платежей из БД с их типом и привязкой.
+
+    Используется когда оплата прошла в Prodamus, но не видна в дашборде:
+    можно увидеть, дошёл ли webhook (есть ли запись), и как платёж
+    классифицирован (unclassified/first/repeat/ignored). Если случайно
+    помечен ignored — повторно классифицировать через /reclassify <id>.
+
+    /recent_payments      — 15 последних
+    /recent_payments 50   — последние 50
+    """
+    if not _is_owner(message):
+        return
+    try:
+        limit = int(command.args.strip()) if command.args else 15
+    except (ValueError, AttributeError):
+        limit = 15
+    limit = max(1, min(limit, 100))
+
+    with get_session() as session:
+        rows = session.execute(
+            select(Payment)
+            .order_by(Payment.paid_at.desc())
+            .limit(limit)
+        ).scalars().all()
+
+    if not rows:
+        await message.answer("В БД нет ни одного платежа.")
+        return
+
+    type_emoji = {
+        "first": "🟢 first",
+        "repeat": "🔁 repeat",
+        "unclassified": "⏳ unclassified",
+        "ignored": "🚫 ignored",
+    }
+    lines: list[str] = []
+    for p in rows:
+        who = p.customer_name or p.customer_phone or p.customer_email or "—"
+        typ = type_emoji.get(p.payment_type, p.payment_type)
+        link = []
+        if p.lead_id:
+            link.append(f"lead#{p.lead_id}")
+        if p.client_id:
+            link.append(f"client#{p.client_id}")
+        link_s = " " + ",".join(link) if link else " (без привязки)"
+        date = p.paid_at.strftime("%d.%m %H:%M") if p.paid_at else "—"
+        lines.append(
+            f"<code>#{p.id}</code> {date} {p.amount:.0f}₽ — {who[:30]} → {typ}{link_s}"
+        )
+
+    text = (
+        f"💳 <b>Последние {len(rows)} платежей</b>\n\n"
+        + "\n".join(lines)
+        + "\n\nПерекрутить классификацию любого: <code>/reclassify ID</code>"
+    )
+    await message.answer(text[:4000], parse_mode="HTML")
+
+
+# ─── /reclassify ───────────────────────────────────────────────────
+
+@router.message(Command("reclassify"))
+async def cmd_reclassify(message: Message, command: CommandObject) -> None:
+    """Передёрнуть классификационный диалог для существующего платежа,
+    в том числе уже помеченного first/repeat/ignored. Удобно если
+    случайно нажал «Игнорировать» или платёж привязан не к тому."""
+    if not _is_owner(message):
+        return
+    if not command.args or not command.args.strip().isdigit():
+        await message.answer(
+            "Использование: <code>/reclassify ID</code>\n"
+            "ID можно посмотреть через /recent_payments",
+            parse_mode="HTML",
+        )
+        return
+    payment_id = int(command.args.strip())
+    with get_session() as session:
+        payment = session.get(Payment, payment_id)
+        if not payment:
+            await message.answer(f"Платёж #{payment_id} не найден.")
+            return
+        # Сбрасываем привязку — диалог классификации заново привяжет
+        # к выбранному лиду/клиенту через те же pay:* callback'и.
+        payment.payment_type = "unclassified"
+        payment.lead_id = None
+        payment.client_id = None
+        session.commit()
+        session.refresh(payment)
+
+        # Импортируем тут, чтобы избежать циклической зависимости на старте.
+        from webhook import _match_clients, _match_leads, _notify_classify
+        client_candidates = _match_clients(
+            session, payment.customer_name, payment.customer_phone, payment.customer_email,
+        )
+        lead_candidates = _match_leads(
+            session, payment.customer_name, payment.customer_phone, payment.customer_email,
+        )
+        _notify_classify(payment, lead_candidates, client_candidates)
+    await message.answer(f"♻️ Платёж #{payment_id} сброшен в unclassified, диалог отправлен выше.")
+
+
 # ─── /admin (помощь) ───────────────────────────────────────────────
 
 @router.message(Command("admin"))
@@ -947,6 +1051,10 @@ async def cmd_admin_help(message: Message) -> None:
         "<code>/setautoreply &lt;текст&gt;</code> — текст автоответа на новые "
         "заявки в Telegram Business\n"
         "<code>/getautoreply</code> — показать текущий автоответ\n"
+        "<code>/recent_payments [N]</code> — список последних N платежей "
+        "(unclassified / first / repeat / ignored), чтобы найти потерявшийся\n"
+        "<code>/reclassify ID</code> — сбросить классификацию платежа и "
+        "передёрнуть диалог (если случайно нажал Игнор или привязал не к тому)\n"
         "<code>/diag_clients</code> — read-only: показать почему "
         "«Первичных оплат: N» не совпадает с «Клиенты: M» в нижнем блоке "
         "(у кого нет лида / лид в другом этапе)\n"
