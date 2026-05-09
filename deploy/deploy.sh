@@ -46,7 +46,8 @@ fi
 #      один раз при первой установке, дальше изменения в репе сами
 #      не доезжали — поэтому, например, фикс backup.sh ждал переустановки.
 for src in "$REPO_DIR/deploy/backup.sh:$BIN_DIR/backup.sh" \
-           "$REPO_DIR/deploy/deploy_listener.py:$BIN_DIR/deploy_listener.py"; do
+           "$REPO_DIR/deploy/deploy_listener.py:$BIN_DIR/deploy_listener.py" \
+           "$REPO_DIR/deploy/poll-deploy.sh:$BIN_DIR/poll-deploy.sh"; do
     s="${src%%:*}"; d="${src##*:}"
     if [[ -f "$s" ]] && ! cmp -s "$s" "$d" 2>/dev/null; then
         install -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0755 "$s" "$d" \
@@ -60,15 +61,23 @@ sudo -u "$SERVICE_USER" "$VENV_DIR/bin/pip" install --quiet \
     -r "$REPO_DIR/requirements.txt" || warn "pip install failed"
 
 # 3. Cron — bulletproof: temp-file подход, без пайплайнов с pipefail.
-#    Понедельник 03:00 МСК.
+#    Сейчас две записи:
+#    - 0 3 * * 1   еженедельный бэкап БД (понедельник 03:00 МСК)
+#    - */2 * * *   poll-deploy: тянет origin/main каждые 2 мин и если
+#                  есть новые коммиты — запускает deploy.sh. Это даёт
+#                  автодеплой когда внешний webhook от GitHub Actions
+#                  не доходит до сервера (TimeWeb WAF/Anti-DDoS режет
+#                  иностранный трафик). Идемпотентно: grep -v вычищает
+#                  свои предыдущие записи, потом добавляем заново.
 TMP_CRON="$(mktemp)"
 sudo -u "$SERVICE_USER" crontab -l > "$TMP_CRON" 2>/dev/null || true  # пусто если нет
 TMP_CRON_NEW="$(mktemp)"
-grep -v "$BIN_DIR/backup.sh" "$TMP_CRON" > "$TMP_CRON_NEW" 2>/dev/null || true
+grep -v -e "$BIN_DIR/backup.sh" -e "$BIN_DIR/poll-deploy.sh" "$TMP_CRON" > "$TMP_CRON_NEW" 2>/dev/null || true
 echo "0 3 * * 1 $BIN_DIR/backup.sh >> $LOG_DIR/backup.log 2>&1" >> "$TMP_CRON_NEW"
+echo "*/2 * * * * $BIN_DIR/poll-deploy.sh" >> "$TMP_CRON_NEW"
 sudo -u "$SERVICE_USER" crontab "$TMP_CRON_NEW" || warn "crontab install failed"
 rm -f "$TMP_CRON" "$TMP_CRON_NEW"
-step "cron updated"
+step "cron updated (backup weekly + poll-deploy every 2 min)"
 
 # 4. Sudoers — критично для админ-команд (/forcehttps и т.п.)
 if [[ -f "$REPO_DIR/deploy/sudoers.d-bot-metrics" ]]; then

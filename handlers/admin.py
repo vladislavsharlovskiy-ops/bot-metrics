@@ -126,6 +126,7 @@ _REPO_BIN_PAIRS = [
     ("/opt/bot-metrics/repo/deploy/deploy.sh",          "/opt/bot-metrics/bin/deploy.sh"),
     ("/opt/bot-metrics/repo/deploy/backup.sh",          "/opt/bot-metrics/bin/backup.sh"),
     ("/opt/bot-metrics/repo/deploy/deploy_listener.py", "/opt/bot-metrics/bin/deploy_listener.py"),
+    ("/opt/bot-metrics/repo/deploy/poll-deploy.sh",     "/opt/bot-metrics/bin/poll-deploy.sh"),
 ]
 
 
