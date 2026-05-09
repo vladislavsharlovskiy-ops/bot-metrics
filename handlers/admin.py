@@ -28,7 +28,8 @@ from sqlalchemy import delete as sql_delete, select
 
 from config import OWNER_ID
 from db import get_session
-from models import Client, Payment
+from models import Client, Lead, Payment
+from stages import CLIENT_CODES
 
 log = logging.getLogger("admin")
 router = Router(name="admin")
@@ -847,6 +848,81 @@ async def cmd_purge_orphans(message: Message) -> None:
     )
 
 
+# ─── /diag_clients ─────────────────────────────────────────────────
+
+@router.message(Command("diag_clients"))
+async def cmd_diag_clients(message: Message) -> None:
+    """Read-only диагностика расхождения между «Первичных оплат: N»
+    в карточке дашборда и «Клиенты: M» в нижнем блоке.
+
+    Карточка считает по таблице Payment (классифицированные платежи),
+    нижний блок — по Lead.stage IN CLIENT_CODES. Расхождение появляется
+    если у клиента есть оплата (Payment), но его Lead удалён или
+    переведён в другой этап (LOST / IGNORING / актив). Эта команда
+    ничего не меняет, только показывает что и где.
+    """
+    if not _is_owner(message):
+        return
+    with get_session() as session:
+        client_payments = session.execute(
+            select(Payment, Client, Lead)
+            .outerjoin(Client, Client.id == Payment.client_id)
+            .outerjoin(Lead, Lead.id == Client.lead_id)
+            .where(Payment.payment_type.in_(("first", "repeat")))
+            .where(Payment.client_id.is_not(None))
+        ).all()
+
+        lead_only_payments = session.execute(
+            select(Payment, Lead)
+            .outerjoin(Lead, Lead.id == Payment.lead_id)
+            .where(Payment.payment_type.in_(("first", "repeat")))
+            .where(Payment.client_id.is_(None))
+        ).all()
+
+    problems: list[str] = []
+    for pay, client, lead in client_payments:
+        if client is None:
+            problems.append(
+                f"💥 Payment #{pay.id} ({pay.amount:.0f}₽, {pay.customer_name or '?'}): "
+                f"client_id={pay.client_id}, но клиента в БД нет"
+            )
+            continue
+        if lead is None:
+            problems.append(
+                f"⚠️ Client «{client.name or client.id}» (Payment #{pay.id}, "
+                f"{pay.amount:.0f}₽): Client.lead_id={client.lead_id}, "
+                f"но такого Lead в БД нет — лид был удалён, клиент остался"
+            )
+            continue
+        if lead.stage not in CLIENT_CODES:
+            problems.append(
+                f"⚠️ «{lead.name or lead.username or lead.id}» (Lead #{lead.id}, "
+                f"Payment {pay.amount:.0f}₽): stage=<code>{lead.stage}</code> — "
+                f"не входит в CLIENT_CODES, поэтому в нижнем блоке «Клиенты» не виден"
+            )
+    for pay, lead in lead_only_payments:
+        if lead is None:
+            problems.append(
+                f"💥 Payment #{pay.id} ({pay.amount:.0f}₽, {pay.customer_name or '?'}): "
+                f"lead_id={pay.lead_id}, client_id=NULL, лид в БД отсутствует"
+            )
+        elif lead.stage not in CLIENT_CODES:
+            problems.append(
+                f"⚠️ «{lead.name or lead.username or lead.id}» (Lead #{lead.id}, "
+                f"Payment {pay.amount:.0f}₽, без Client): stage=<code>{lead.stage}</code>"
+            )
+
+    if not problems:
+        await message.answer(
+            "✅ Расхождений между Payment и Lead нет — карточка и список "
+            "«Клиенты» должны показывать одинаковые цифры.",
+            parse_mode="HTML",
+        )
+        return
+    text = "🔍 <b>Расхождения, видимые на дашборде:</b>\n\n" + "\n\n".join(problems)
+    await message.answer(text[:4000], parse_mode="HTML")
+
+
 # ─── /admin (помощь) ───────────────────────────────────────────────
 
 @router.message(Command("admin"))
@@ -871,6 +947,9 @@ async def cmd_admin_help(message: Message) -> None:
         "<code>/setautoreply &lt;текст&gt;</code> — текст автоответа на новые "
         "заявки в Telegram Business\n"
         "<code>/getautoreply</code> — показать текущий автоответ\n"
+        "<code>/diag_clients</code> — read-only: показать почему "
+        "«Первичных оплат: N» не совпадает с «Клиенты: M» в нижнем блоке "
+        "(у кого нет лида / лид в другом этапе)\n"
         "<code>/purge_orphans</code> — подчистить «осиротевшие» Clients/"
         "Payments после удалений лидов до cascade-delete фикса\n"
         "<code>/deployurl</code> — показать URL для GitHub-вебхука "
