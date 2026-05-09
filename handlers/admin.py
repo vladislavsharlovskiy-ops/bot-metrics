@@ -35,6 +35,7 @@ log = logging.getLogger("admin")
 router = Router(name="admin")
 
 ENV_FILE = Path("/opt/bot-metrics/.env")
+REPO_DIR = "/opt/bot-metrics/repo"
 BACKUP_SCRIPT = "/opt/bot-metrics/bin/backup.sh"
 DEPLOY_SCRIPT = "/opt/bot-metrics/bin/deploy.sh"
 
@@ -298,6 +299,45 @@ async def cmd_deploy_url(message: Message) -> None:
         "4. Content type: <code>application/json</code>\n"
         "5. Events: Just the push event → <b>Add webhook</b>\n\n"
         "Любой из способов — после настройки <code>/redeploy</code> больше не нужен.",
+        parse_mode="HTML",
+    )
+
+
+# ─── /version ──────────────────────────────────────────────────────
+#
+# Показывает что сейчас задеплоено: SHA + заголовок последнего коммита
+# в репе на сервере, плюс mtime скриптов в bin/. Нужно чтобы быстро
+# проверять «доехал ли мой фикс до прода» без SSH — особенно после
+# настройки авто-деплоя через GitHub Actions.
+
+@router.message(Command("version"))
+async def cmd_version(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    try:
+        head = subprocess.check_output(
+            ["git", "-C", REPO_DIR, "log", "-1", "--format=%h %ci%n%s"],
+            stderr=subprocess.STDOUT,
+            timeout=5,
+            text=True,
+        ).strip()
+    except Exception as e:  # noqa: BLE001
+        await message.answer(f"⚠ git log упал: <code>{e!s}</code>", parse_mode="HTML")
+        return
+
+    bin_lines: list[str] = []
+    for path in (BACKUP_SCRIPT, DEPLOY_SCRIPT, "/opt/bot-metrics/bin/deploy_listener.py"):
+        p = Path(path)
+        if p.exists():
+            mtime = datetime.fromtimestamp(p.stat().st_mtime)
+            bin_lines.append(f"  {p.name}: <code>{mtime:%Y-%m-%d %H:%M:%S}</code>")
+        else:
+            bin_lines.append(f"  {p.name}: ❌ нет")
+
+    await message.answer(
+        "📦 <b>Сейчас задеплоено</b>\n"
+        f"<code>{head}</code>\n\n"
+        "<b>bin/ mtime</b>\n" + "\n".join(bin_lines),
         parse_mode="HTML",
     )
 
@@ -1143,6 +1183,8 @@ async def cmd_admin_help(message: Message) -> None:
         "<code>/purge_orphans</code> — подчистить «осиротевшие» Clients/"
         "Payments после удалений лидов до cascade-delete фикса\n"
         "<code>/deployurl</code> — показать URL для GitHub-вебхука "
-        "(один раз настроишь — авто-деплой при push в main, /redeploy больше не нужен)",
+        "(один раз настроишь — авто-деплой при push в main, /redeploy больше не нужен)\n"
+        "<code>/version</code> — какой коммит сейчас на сервере + mtime "
+        "скриптов в bin/ (быстрая проверка, доехал ли свежий фикс)",
         parse_mode="HTML",
     )
