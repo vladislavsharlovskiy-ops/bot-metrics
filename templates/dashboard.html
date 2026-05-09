@@ -206,7 +206,10 @@
         <button @click="setStatus('declined')" :class="leadFilter==='declined' ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">📦 Без пакета</button>
         <button @click="setStatus('all')"      :class="leadFilter==='all'      ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'" class="px-3 py-1.5 rounded-md font-medium whitespace-nowrap">Все</button>
       </div>
-      <input type="search" x-model.debounce.300ms="searchQuery" @input="loadLeads()" placeholder="Поиск…" class="w-full sm:flex-1 sm:min-w-[260px] px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"/>
+      <div class="flex gap-2 sm:flex-1 sm:min-w-[260px]">
+        <input type="search" x-model.debounce.300ms="searchQuery" @input="loadLeads()" placeholder="Поиск…" class="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"/>
+        <a href="/api/requests.csv" download class="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-sm font-medium whitespace-nowrap" title="Скачать все заявки CSV-файлом — купившие в начале (это ЦА для контента)">📋 Запросы</a>
+      </div>
     </div>
 
     <!-- Сводка для вкладки «Клиенты» -->
