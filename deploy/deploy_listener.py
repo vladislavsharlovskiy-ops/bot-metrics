@@ -15,12 +15,36 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("deploy-listener")
 
-DEPLOY_SECRET = os.environ.get("DEPLOY_SECRET", "").strip()
+ENV_FILE = "/opt/bot-metrics/.env"
 DEPLOY_SCRIPT = "/opt/bot-metrics/bin/deploy.sh"
 PORT = int(os.environ.get("DEPLOY_LISTENER_PORT", "9876"))
 
-if not DEPLOY_SECRET:
-    log.error("DEPLOY_SECRET не задан — listener не стартует")
+
+def _read_deploy_secret() -> str:
+    """Читает DEPLOY_SECRET из .env на каждом запросе.
+
+    Раньше брали один раз на старте через os.environ — но systemd подгружает
+    EnvironmentFile только при старте сервиса. Если кто-то менял .env
+    (или install.sh регенерировал секрет) и не рестартанул listener — в памяти
+    оставался старый секрет, бот через /deployurl показывал новый, и POST
+    через GitHub Actions ловил HTTP 403 forbidden навечно.
+
+    Re-read дёшев (одна-две сотни байт на запрос), зато развязывает
+    рестарт-зависимость и /deployurl всегда показывает то, что listener
+    реально проверяет.
+    """
+    try:
+        with open(ENV_FILE, encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("DEPLOY_SECRET="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return os.environ.get("DEPLOY_SECRET", "").strip()
+
+
+if not _read_deploy_secret():
+    log.error("DEPLOY_SECRET не задан в %s — listener не стартует", ENV_FILE)
     sys.exit(1)
 
 
@@ -34,13 +58,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         # GitHub при создании вебхука сначала шлёт ping (с GET для health).
         # Возвращаем 200, чтобы зелёная галочка появилась.
-        if self.path == f"/__deploy/{DEPLOY_SECRET}":
+        if self.path == f"/__deploy/{_read_deploy_secret()}":
             self._reply(200, "deploy-listener ok\n")
         else:
             self._reply(404, "not found\n")
 
     def do_POST(self) -> None:
-        if self.path != f"/__deploy/{DEPLOY_SECRET}":
+        if self.path != f"/__deploy/{_read_deploy_secret()}":
             self._reply(403, "forbidden\n")
             return
         # Читаем тело и выбрасываем — нам важен только факт пуша

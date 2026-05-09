@@ -144,6 +144,44 @@ def _sync_bin_from_repo() -> list[str]:
     return synced
 
 
+# ─── /restart_listener ─────────────────────────────────────────────
+#
+# Перезапускает сервис bot-metrics-deploy.service. deploy.sh специально его
+# НЕ рестартует (иначе бы оборвал самого себя — listener-же его и запустил),
+# поэтому новые версии deploy_listener.py подхватываются только через эту
+# команду или ручной systemctl restart на сервере.
+#
+# sudoers (deploy/sudoers.d-bot-metrics) уже разрешает `bot` юзеру запускать
+# `systemctl restart bot-metrics-deploy` без пароля.
+
+@router.message(Command("restart_listener"))
+async def cmd_restart_listener(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    try:
+        r = subprocess.run(
+            ["sudo", "/bin/systemctl", "restart", "bot-metrics-deploy"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception as e:  # noqa: BLE001
+        await message.answer(f"⚠ Не удалось рестартануть: <code>{e!s}</code>", parse_mode="HTML")
+        return
+    if r.returncode == 0:
+        await message.answer(
+            "🔁 <code>bot-metrics-deploy</code> рестартанут.\n\n"
+            "Теперь listener читает свежий <code>DEPLOY_SECRET</code> из .env.\n"
+            "Можно проверить автодеплой через GitHub Actions: "
+            "https://github.com/vladislavsharlovskiy-ops/bot-metrics/actions → Re-run jobs",
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    else:
+        await message.answer(
+            f"⚠ systemctl exit={r.returncode}\n<code>{(r.stderr or r.stdout)[:500]}</code>",
+            parse_mode="HTML",
+        )
+
+
 # ─── /setdashboardurl ──────────────────────────────────────────────
 
 _URL_RE = re.compile(r"^https?://[^\s]+$")
@@ -1185,6 +1223,9 @@ async def cmd_admin_help(message: Message) -> None:
         "<code>/deployurl</code> — показать URL для GitHub-вебхука "
         "(один раз настроишь — авто-деплой при push в main, /redeploy больше не нужен)\n"
         "<code>/version</code> — какой коммит сейчас на сервере + mtime "
-        "скриптов в bin/ (быстрая проверка, доехал ли свежий фикс)",
+        "скриптов в bin/ (быстрая проверка, доехал ли свежий фикс)\n"
+        "<code>/restart_listener</code> — рестарт сервиса auto-deploy "
+        "(нужен один раз когда обновился deploy_listener.py или менялся "
+        "DEPLOY_SECRET в .env)",
         parse_mode="HTML",
     )
