@@ -24,7 +24,7 @@ from pathlib import Path
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
-from sqlalchemy import select
+from sqlalchemy import delete as sql_delete, select
 
 from config import OWNER_ID
 from db import get_session
@@ -795,16 +795,19 @@ async def cmd_set_auto_reply(message: Message, command: CommandObject) -> None:
 
 @router.message(Command("purge_orphans"))
 async def cmd_purge_orphans(message: Message) -> None:
-    """Подчистить осиротевшие Clients (lead_id IS NULL) и их Payments.
+    """Подчистить осиротевшие Clients/Payments после удалений лидов
+    до cascade-delete фикса.
 
-    Нужно один раз после деплоя cascade-delete фикса: до него удаление
-    лида оставляло связанные Client и Payment в БД (FK ondelete=SET
-    NULL), и дашборд продолжал их учитывать. После выполнения:
-    Client с lead_id IS NULL удаляются ORM-delete-ом, через cascade
-    'all, delete-orphan' автоматически чистятся их Payments и
-    RepeatSessions. Платежи, которые ещё не классифицированы (lead_id
-    и client_id оба NULL, но это нормальное состояние unclassified) —
-    не трогаем.
+    Два кейса:
+    1. Client с lead_id IS NULL — originating-лид удалили, но Client
+       остался (FK ondelete=SET NULL). ORM-delete + cascade='all,
+       delete-orphan' стирают его Payments и RepeatSessions.
+    2. Payment с lead_id IS NULL И client_id IS NULL И payment_type
+       IN ('first','repeat') — «дважды осиротевший»: и лид, и клиент
+       уже удалены, но классифицированный платёж остался и попадает
+       в карточку «Первичных оплат» на дашборде. Платежи с
+       payment_type='unclassified' не трогаем — это нормальное
+       состояние свежего webhook'а, ждущего ручной классификации.
     """
     if not _is_owner(message):
         return
@@ -813,16 +816,33 @@ async def cmd_purge_orphans(message: Message) -> None:
             select(Client).where(Client.lead_id.is_(None))
         ).scalars().all()
         client_count = len(orphan_clients)
-        payment_count = sum(len(c.payments) for c in orphan_clients)
-        session_count = sum(len(c.sessions) for c in orphan_clients)
+        payments_via_client = sum(len(c.payments) for c in orphan_clients)
+        sessions_via_client = sum(len(c.sessions) for c in orphan_clients)
         for c in orphan_clients:
             session.delete(c)
+
+        result = session.execute(
+            sql_delete(Payment)
+            .where(Payment.lead_id.is_(None))
+            .where(Payment.client_id.is_(None))
+            .where(Payment.payment_type.in_(("first", "repeat")))
+        )
+        bare_payments = result.rowcount or 0
         session.commit()
+
+    total = client_count + payments_via_client + sessions_via_client + bare_payments
+    if total == 0:
+        await message.answer(
+            "🧹 Ничего лишнего не нашёл — БД чистая.",
+            parse_mode="HTML",
+        )
+        return
     await message.answer(
         f"🧹 Подчистили:\n"
-        f"• клиентов: {client_count}\n"
-        f"• платежей: {payment_count}\n"
-        f"• сессий повтора: {session_count}",
+        f"• клиентов без лида: {client_count}\n"
+        f"• их платежей: {payments_via_client}\n"
+        f"• их сессий повтора: {sessions_via_client}\n"
+        f"• одиночных «осиротевших» платежей: {bare_payments}",
         parse_mode="HTML",
     )
 
