@@ -25,6 +25,7 @@ from stages import (
     LOST_STAGE,
     PAID,
     PACKAGE_BOUGHT,
+    PACKAGE_DECLINED,
     QUALIFIED,
     SOURCES,
     SOURCE_TITLES,
@@ -62,6 +63,8 @@ def _lead_dict(lead: Lead) -> dict:
         "is_active": lead.stage in ACTIVE_CODES,
         "is_lost": lead.stage == LOST,
         "is_ignoring": lead.stage == IGNORING,
+        "is_consulted": lead.stage == CONSULTED,
+        "is_declined": lead.stage == PACKAGE_DECLINED,
     }
 
 
@@ -468,6 +471,8 @@ def api_leads():
             stmt = stmt.where(Lead.stage == PACKAGE_BOUGHT)
         elif status == "ignoring":
             stmt = stmt.where(Lead.stage.in_(IGNORING_CODES))
+        elif status == "declined":
+            stmt = stmt.where(Lead.stage == PACKAGE_DECLINED)
         # status == 'all' — no filter
         if q:
             pat = f"%{q}%"
@@ -521,6 +526,29 @@ def api_advance(lead_id: int):
             return jsonify({"error": "already final"}), 400
         lead.stage = nxt.code
         session.add(StageHistory(lead_id=lead.id, stage=nxt.code))
+        session.commit()
+        session.refresh(lead)
+    _try_sheets_sync(lead_id)
+    return jsonify({"lead": _lead_dict(lead)})
+
+
+@app.post("/api/leads/<int:lead_id>/decline_package")
+def api_decline_package(lead_id: int):
+    """Перевод клиента в PACKAGE_DECLINED («без пакета»).
+
+    Используется на карточке в этапе CONSULTED, когда консультация
+    прошла, но пакет клиент не купил. Лид выпадает из вкладки
+    «Клиенты» (CLIENT_CODES не включает PACKAGE_DECLINED), но Payment
+    остаётся, выручка считается. Если потом всё-таки купит пакет —
+    кнопка «Дальше» в карточке вернёт его в PACKAGE_BOUGHT
+    (special-case в next_stage).
+    """
+    with get_session() as session:
+        lead = session.get(Lead, lead_id)
+        if not lead:
+            return jsonify({"error": "not found"}), 404
+        lead.stage = PACKAGE_DECLINED
+        session.add(StageHistory(lead_id=lead.id, stage=PACKAGE_DECLINED))
         session.commit()
         session.refresh(lead)
     _try_sheets_sync(lead_id)
