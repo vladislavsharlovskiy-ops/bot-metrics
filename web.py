@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import csv
 import hmac
+import io
 import logging
 from datetime import datetime, time, timedelta
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request
 from sqlalchemy import func, or_, select
 
 from config import LEADS_API_KEY
@@ -503,6 +505,79 @@ def api_leads():
             d["cycle_days"] = m["cycle_days"]
         leads_out.append(d)
     return jsonify({"leads": leads_out, "clients_summary": agg})
+
+
+@app.get("/api/requests.csv")
+def api_requests_csv():
+    """Выгрузка всех заявок с текстом запроса для контент-разбора.
+
+    Сортировка: сначала купившие (paid_amount DESC), потом по дате
+    создания (свежие сверху). Идея — клиенты, которые ДЕЙСТВИТЕЛЬНО
+    купили, формулируют свою боль так же, как ЦА: их запросы — самый
+    ценный материал для постов/видео. Колонка «купил» (✓/—) даёт
+    мгновенный фильтр в Excel/Sheets.
+
+    Источник данных — таблица Lead. Поле `request` — это первое
+    сообщение лида в Telegram-Business (или request-поле, если
+    добавляли через API). Сумма — сумма всех Payments (first+repeat),
+    привязанных к этому лиду через client_id или lead_id.
+    """
+    with get_session() as session:
+        leads = session.execute(
+            select(Lead).order_by(Lead.created_at.desc())
+        ).scalars().all()
+
+        # Платёж принадлежит лиду либо напрямую (Payment.lead_id),
+        # либо через клиента (Payment.client_id → Client.lead_id).
+        # Собираем мапу {lead_id: total_paid} в памяти за два запроса —
+        # выходит проще и читаемее, чем outer-join+coalesce+case в SQL.
+        client_to_lead = dict(
+            session.execute(
+                select(Client.id, Client.lead_id).where(Client.lead_id.is_not(None))
+            ).all()
+        )
+        paid_per_lead: dict[int, float] = {}
+        for plid, pcid, amount in session.execute(
+            select(Payment.lead_id, Payment.client_id, Payment.amount)
+            .where(Payment.payment_type.in_(("first", "repeat")))
+        ).all():
+            target = plid or client_to_lead.get(pcid)
+            if target:
+                paid_per_lead[target] = paid_per_lead.get(target, 0) + (amount or 0)
+
+    leads_sorted = sorted(
+        leads,
+        key=lambda l: (-paid_per_lead.get(l.id, 0), -l.created_at.timestamp()),
+    )
+
+    out = io.StringIO()
+    out.write("﻿")  # BOM, чтобы Excel правильно открыл UTF-8
+    writer = csv.writer(out, delimiter=";")
+    writer.writerow([
+        "id", "купил", "сумма_₽", "источник", "имя", "username",
+        "этап", "создан", "запрос_клиента",
+    ])
+    for lead in leads_sorted:
+        stage = BY_CODE.get(lead.stage)
+        amount = paid_per_lead.get(lead.id, 0)
+        writer.writerow([
+            lead.id,
+            "✓" if amount > 0 else "",
+            int(amount),
+            SOURCE_TITLES.get(lead.source, lead.source),
+            lead.name or "",
+            lead.username or "",
+            stage.title if stage else lead.stage,
+            lead.created_at.strftime("%Y-%m-%d %H:%M"),
+            (lead.request or "").replace("\r\n", " ").replace("\n", " ").strip(),
+        ])
+
+    response = Response(out.getvalue(), mimetype="text/csv; charset=utf-8")
+    today = datetime.now().strftime("%Y-%m-%d")
+    response.headers["Content-Disposition"] = (
+        f'attachment; filename="requests-{today}.csv"'
+    )
+    return response
 
 
 @app.get("/api/stages")
