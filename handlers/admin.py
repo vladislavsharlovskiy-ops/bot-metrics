@@ -226,24 +226,22 @@ async def cmd_test_deploy(message: Message) -> None:
     else:
         lines.extend(test_results)
 
-    # 4) POST/GET через HTTPS-nginx (как делает GitHub Actions). Используем
-    #    Host: header чтобы попасть на правильный server-блок и -k чтобы
-    #    закрыть глаза на self-signed (мы и так знаем кто отвечает).
+    # 4) GET через HTTPS-nginx с Host: header (тест что 443-блок видит
+    #    /__deploy/ location). НЕ делаем POST — POST на правильный путь
+    #    запускает deploy.sh, и /test_deploy сам себе триггерит деплой,
+    #    бот рестартует посреди обработки и ответ не приходит.
     https_results: list[str] = []
     https_secret = (file_secrets[-1] if file_secrets else env_secret)
     if https_secret:
         tests = [
-            ("GET без /",   "GET",  ""),
-            ("GET с /",     "GET",  "/"),
-            ("POST без /",  "POST", ""),
-            ("POST с /",    "POST", "/"),
+            ("GET без /",  ""),
+            ("GET с /",    "/"),
         ]
-        for label, method, suffix in tests:
+        for label, suffix in tests:
             try:
                 r = subprocess.run(
                     ["curl", "-sS", "-k", "-o", "/dev/null", "-w", "%{http_code}",
                      "--max-time", "5",
-                     "-X", method,
                      "-H", "Host: dashboard.sharlovsky.pro",
                      f"https://127.0.0.1/__deploy/{https_secret}{suffix}"],
                     capture_output=True, text=True, timeout=10,
