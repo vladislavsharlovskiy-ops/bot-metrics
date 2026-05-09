@@ -8,8 +8,18 @@ DATA_DIR="$ROOT_DIR/data"
 BACKUP_DIR="$DATA_DIR/backups"
 ENV_FILE="$ROOT_DIR/.env"
 
-# shellcheck disable=SC1090
-set -a; source "$ENV_FILE"; set +a
+# Раньше тут был `source "$ENV_FILE"`, но он падал на значениях с пробелами
+# и `!` (например BUSINESS_AUTO_REPLY="Добрый день! ..."): bash трактовал
+# пробел как конец присваивания, а слово после — как команду. systemd
+# EnvironmentFile такие значения ест нормально, поэтому сами сервисы
+# работали, а вот этот скрипт — нет. Читаем нужные ключи точечно.
+get_env() {
+    # head -1 — на случай если ключ дублирован (берём первый); cut -d= -f2-
+    # сохраняет '=' внутри значения (часть base64-токенов их содержит).
+    grep -E "^${1}=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-
+}
+BOT_TOKEN="$(get_env BOT_TOKEN)"
+OWNER_ID="$(get_env OWNER_ID)"
 
 if [[ -z "${BOT_TOKEN:-}" || -z "${OWNER_ID:-}" ]]; then
   echo "[backup] BOT_TOKEN/OWNER_ID не заданы в $ENV_FILE — отправка в TG невозможна"

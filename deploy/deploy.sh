@@ -42,6 +42,19 @@ if [[ -f "$SELF_UPDATE_SRC" ]] && [[ "$0" != "$SELF_UPDATE_SRC" ]] \
     exec "$0" "$@"
 fi
 
+# 0.2. Сync вспомогательных bin-скриптов из repo. install.sh кладёт их
+#      один раз при первой установке, дальше изменения в репе сами
+#      не доезжали — поэтому, например, фикс backup.sh ждал переустановки.
+for src in "$REPO_DIR/deploy/backup.sh:$BIN_DIR/backup.sh" \
+           "$REPO_DIR/deploy/deploy_listener.py:$BIN_DIR/deploy_listener.py"; do
+    s="${src%%:*}"; d="${src##*:}"
+    if [[ -f "$s" ]] && ! cmp -s "$s" "$d" 2>/dev/null; then
+        install -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0755 "$s" "$d" \
+            && step "synced $(basename "$s")" \
+            || warn "sync $(basename "$s") failed"
+    fi
+done
+
 # 1. Python deps
 sudo -u "$SERVICE_USER" "$VENV_DIR/bin/pip" install --quiet \
     -r "$REPO_DIR/requirements.txt" || warn "pip install failed"
