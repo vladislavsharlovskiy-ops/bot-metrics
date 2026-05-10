@@ -71,15 +71,30 @@ _NON_CITY_WORDS = {
 
 def has_lead_intro(text: str | None) -> bool:
     """True, если в тексте есть кодовая фраза «Я из <город>»
-    (а не «Я из Telegram-бота», «Я из канала», «Я из вашего канала»)."""
+    (а не «Я из Telegram-бота», «Я из канала», «Я из вашего канала»).
+
+    Дополнительно: True если в сообщении явно назван известный источник
+    («Я из Telegram-бота», «нашла в Instagram», «из вашего канала» и т.п.).
+    Это тоже валидный лид — клиент явно представляется и идентифицирует
+    канал, по которому пришёл, просто не словом-городом. Раньше такие
+    сообщения молча игнорились (после #50 — overcorrection), и реальные
+    клиенты типа Алёны терялись."""
     if not text:
         return False
     norm = text.replace("ё", "е").replace("Ё", "Е")
     m = _LEAD_INTRO_RE.search(norm)
-    if not m:
-        return False
-    word = m.group(1).lower()
-    return word not in _NON_CITY_WORDS
+    if m:
+        word = m.group(1).lower()
+        if word not in _NON_CITY_WORDS:
+            return True
+    # Источник определился (бот / инста / ютуб / канал и пр.) — считаем
+    # это явной самоидентификацией клиента. detect_source возвращает не None
+    # только когда в тексте есть распознанные ключевые слова, поэтому
+    # «привет», «здравствуйте, можно вопрос» и прочие случайности по-прежнему
+    # не пройдут.
+    if detect_source(text) is not None:
+        return True
+    return False
 
 
 def detect_source(text: str | None) -> str | None:
