@@ -338,6 +338,97 @@ async def cmd_diag_nginx(message: Message) -> None:
         )
 
 
+# ─── /diag_poll ────────────────────────────────────────────────────
+#
+# Диагностика poll-deploy. Показывает:
+#   1) local HEAD в /opt/bot-metrics/repo vs origin/main (живой git fetch)
+#   2) crontab юзера bot — есть ли там строка с poll-deploy.sh
+#   3) tail /opt/bot-metrics/logs/poll-deploy.log
+#   4) есть ли сам /opt/bot-metrics/bin/poll-deploy.sh
+# По выводу сразу видно, на каком из этапов сломалось.
+
+@router.message(Command("diag_poll"))
+async def cmd_diag_poll(message: Message) -> None:
+    if not _is_owner(message):
+        return
+
+    lines: list[str] = ["🔬 <b>Poll-deploy status</b>", ""]
+
+    # 1. HEAD сравнение (с принудительным fetch, чтобы видеть актуальное origin)
+    try:
+        local_head = subprocess.check_output(
+            ["git", "-C", REPO_DIR, "log", "-1", "--format=%h %s"],
+            text=True, timeout=5,
+        ).strip()
+    except Exception as e:  # noqa: BLE001
+        local_head = f"ERR: {e!s:.80}"
+    try:
+        subprocess.run(
+            ["git", "-C", REPO_DIR, "fetch", "--quiet", "origin", "main"],
+            check=False, timeout=15, capture_output=True,
+        )
+        origin_head = subprocess.check_output(
+            ["git", "-C", REPO_DIR, "log", "-1", "--format=%h %s", "origin/main"],
+            text=True, timeout=5,
+        ).strip()
+    except Exception as e:  # noqa: BLE001
+        origin_head = f"ERR: {e!s:.80}"
+    lines.append("<b>1) HEAD-сравнение</b>")
+    lines.append(f"  local: <code>{local_head}</code>")
+    lines.append(f"  origin/main: <code>{origin_head}</code>")
+    if local_head == origin_head and "ERR" not in local_head:
+        lines.append("  ✅ совпадают")
+    else:
+        lines.append("  ⚠ расходятся — poll-deploy должен был догнать")
+
+    # 2. Crontab
+    lines.append("")
+    lines.append("<b>2) Crontab юзера bot</b>")
+    try:
+        crontab = subprocess.check_output(
+            ["crontab", "-l"], text=True, timeout=5,
+        )
+        poll_lines = [l for l in crontab.splitlines() if "poll-deploy" in l]
+        if poll_lines:
+            for l in poll_lines:
+                lines.append(f"  ✅ <code>{l.replace('<', '&lt;').replace('>', '&gt;')}</code>")
+        else:
+            lines.append("  ❌ строки с poll-deploy НЕТ — нужен /redeploy")
+    except Exception as e:  # noqa: BLE001
+        lines.append(f"  ⚠ crontab -l failed: <code>{e!s:.80}</code>")
+
+    # 3. poll-deploy.log tail
+    lines.append("")
+    lines.append("<b>3) poll-deploy.log (последние 30 строк):</b>")
+    log_file = Path("/opt/bot-metrics/logs/poll-deploy.log")
+    if not log_file.exists():
+        lines.append("  ⚠ файла нет — поллер ни разу не находил новых коммитов")
+        lines.append("  (норм если main не менялся; ненорм если был мердж >2 мин назад)")
+    else:
+        try:
+            tail = log_file.read_text(encoding="utf-8").splitlines()[-30:]
+            if tail:
+                escaped = "\n".join(tail).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                lines.append(f"<pre>{escaped[:2500]}</pre>")
+            else:
+                lines.append("  (файл пустой)")
+        except Exception as e:  # noqa: BLE001
+            lines.append(f"  ⚠ <code>{e!s}</code>")
+
+    # 4. poll-deploy.sh в bin?
+    lines.append("")
+    lines.append("<b>4) /opt/bot-metrics/bin/poll-deploy.sh</b>")
+    pd = Path("/opt/bot-metrics/bin/poll-deploy.sh")
+    if pd.exists():
+        mtime = datetime.fromtimestamp(pd.stat().st_mtime)
+        size = pd.stat().st_size
+        lines.append(f"  ✅ есть (mtime {mtime:%Y-%m-%d %H:%M:%S}, {size} байт)")
+    else:
+        lines.append("  ❌ файла нет — нужен /redeploy чтобы синкнуть из репы")
+
+    await message.answer("\n".join(lines)[:4000], parse_mode="HTML")
+
+
 # ─── /restart_listener ─────────────────────────────────────────────
 #
 # Перезапускает сервис bot-metrics-deploy.service. deploy.sh специально его
