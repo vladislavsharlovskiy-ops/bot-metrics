@@ -338,6 +338,83 @@ async def cmd_diag_nginx(message: Message) -> None:
         )
 
 
+# ─── /addlead ──────────────────────────────────────────────────────
+#
+# Создать лида руками — нужно когда клиент написал в business-чат, но
+# обработчик его пропустил (например, фраза не подошла под has_lead_intro,
+# или клиент пришёл по нестандартному скрипту). После /addlead лид
+# попадает на дашборд и в обычную воронку.
+#
+# Формат: pipe-separated, обязательно как минимум name.
+#   /addlead Имя Фамилия
+#   /addlead Имя Фамилия | instagram
+#   /addlead Имя Фамилия | instagram | @username | текст_заявки
+
+@router.message(Command("addlead"))
+async def cmd_add_lead(message: Message, command: CommandObject) -> None:
+    if not _is_owner(message):
+        return
+    arg = (command.args or "").strip()
+    if not arg:
+        await message.answer(
+            "Использование:\n"
+            "<code>/addlead Имя Фамилия</code>\n"
+            "<code>/addlead Имя Фамилия | instagram</code>\n"
+            "<code>/addlead Имя Фамилия | instagram | @username | текст заявки</code>\n\n"
+            "Источники: instagram, youtube, telegram, tiktok, rutube, vk, unknown",
+            parse_mode="HTML",
+        )
+        return
+    parts = [p.strip() for p in arg.split("|")]
+    name = parts[0] or None
+    source = (parts[1].lower() if len(parts) > 1 and parts[1] else "unknown")
+    username = (parts[2] if len(parts) > 2 else None) or None
+    if username:
+        username = username if username.startswith("@") else f"@{username}"
+    request_text = (parts[3] if len(parts) > 3 else None) or None
+
+    from stages import LEAD_NEW, SOURCE_TITLES
+    from models import Lead, StageHistory
+    if source not in SOURCE_TITLES:
+        await message.answer(
+            f"⚠ source <code>{source}</code> неизвестен. "
+            f"Допустимые: {', '.join(SOURCE_TITLES.keys())}",
+            parse_mode="HTML",
+        )
+        return
+
+    with get_session() as session:
+        lead = Lead(
+            name=name,
+            username=username,
+            source=source,
+            request=request_text,
+            stage=LEAD_NEW,
+        )
+        session.add(lead)
+        session.flush()
+        session.add(StageHistory(lead_id=lead.id, stage=LEAD_NEW))
+        session.commit()
+        session.refresh(lead)
+        lead_id = lead.id
+
+    await message.answer(
+        f"✅ Лид <b>#{lead_id}</b> создан\n"
+        f"👤 {name or '—'}\n"
+        f"📥 {SOURCE_TITLES[source]}\n"
+        f"📝 {request_text or '—'}\n\n"
+        f"Появится на дашборде, можно обрабатывать обычной воронкой.",
+        parse_mode="HTML",
+    )
+
+    # Best-effort sync в Sheets, как делает business-handler
+    try:
+        from sheets import sync_lead
+        sync_lead(lead_id)
+    except Exception as e:  # noqa: BLE001
+        log.warning("sheets sync skipped for /addlead %s: %s", lead_id, e)
+
+
 # ─── /diag_poll ────────────────────────────────────────────────────
 #
 # Диагностика poll-deploy. Показывает:
