@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import subprocess
 from typing import Any, Awaitable, Callable, Dict
 
 from aiogram import BaseMiddleware, Bot, Dispatcher
@@ -76,8 +78,53 @@ BOT_COMMANDS = [
 ]
 
 
+def _ensure_poll_deploy_cron() -> None:
+    """Idempotent self-installer for poll-deploy crontab entry.
+
+    Запускается на каждом старте бота. Проверяет crontab юзера bot, и если
+    строки `*/2 * * * * /opt/bot-metrics/bin/poll-deploy.sh` нет — добавляет.
+    deploy.sh пытается ставить эту же строку, но иногда это не срабатывает
+    (sudo -u bot crontab из root-контекста + cron permissions могут давать
+    silent fail). Авто-чек на старте bota — пуленепробиваемая страховка.
+
+    Не падает если cron вообще недоступен в окружении, бот всё равно стартует.
+    """
+    poll_path = "/opt/bot-metrics/bin/poll-deploy.sh"
+    cron_line = f"*/2 * * * * {poll_path}"
+    if not os.path.isfile(poll_path):
+        log.info("poll-deploy: %s missing, skip cron check", poll_path)
+        return
+    try:
+        cur = subprocess.run(
+            ["crontab", "-l"], capture_output=True, text=True, timeout=5,
+        )
+        # rc=1 + пустой stdout = нет crontab вообще, это норм для свежего юзера
+        existing = cur.stdout if cur.returncode in (0, 1) else ""
+    except Exception as e:  # noqa: BLE001
+        log.warning("poll-deploy: crontab -l failed: %s", e)
+        return
+
+    if "poll-deploy.sh" in existing:
+        log.info("poll-deploy: cron entry уже стоит, пропускаем")
+        return
+
+    new_crontab = (existing.rstrip() + ("\n" if existing.strip() else "")) + cron_line + "\n"
+    try:
+        r = subprocess.run(
+            ["crontab", "-"], input=new_crontab,
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode == 0:
+            log.info("poll-deploy: cron entry установлен")
+        else:
+            log.warning("poll-deploy: crontab install rc=%d stderr=%s", r.returncode, r.stderr[:200])
+    except Exception as e:  # noqa: BLE001
+        log.warning("poll-deploy: crontab install failed: %s", e)
+
+
 async def main() -> None:
     init_db()
+    _ensure_poll_deploy_cron()
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     dp.update.outer_middleware(OwnerOnlyMiddleware())
