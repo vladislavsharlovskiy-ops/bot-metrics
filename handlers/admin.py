@@ -1187,7 +1187,11 @@ async def cmd_get_auto_reply(message: Message) -> None:
     """Показывает текущий текст автоответа на новые заявки в Business-чатах."""
     if not _is_owner(message):
         return
-    current = os.environ.get("BUSINESS_AUTO_REPLY", "").strip()
+    raw = os.environ.get("BUSINESS_AUTO_REPLY", "").strip()
+    # Многострочные значения мы храним с escape-формой \n (см. /setautoreply),
+    # потому что systemd EnvironmentFile читает только до первого реального
+    # newline. На дисплее показываем человеку как реальный текст.
+    current = raw.replace("\\n", "\n")
     if current:
         await message.answer(
             f"📣 <b>Текущий автоответ на новые заявки:</b>\n\n"
@@ -1230,8 +1234,15 @@ async def cmd_set_auto_reply(message: Message, command: CommandObject) -> None:
     else:
         new_value = arg
 
-    os.environ["BUSINESS_AUTO_REPLY"] = new_value
-    persisted = _persist_env(ENV_FILE, "BUSINESS_AUTO_REPLY", new_value)
+    # systemd EnvironmentFile читает .env построчно, KEY=VALUE до первого
+    # newline. Если автоответ многострочный — реальные \n в .env обрежут
+    # значение (как было: «Добрый день! Благодарю за доверие.» — а
+    # остальные строки терялись). Сохраняем с escape: \n → литеральный \n
+    # (два символа). business.py читает env и делает обратную замену.
+    encoded = new_value.replace("\n", "\\n")
+
+    os.environ["BUSINESS_AUTO_REPLY"] = encoded
+    persisted = _persist_env(ENV_FILE, "BUSINESS_AUTO_REPLY", encoded)
 
     if persisted is not True:
         await message.answer(
@@ -1244,9 +1255,8 @@ async def cmd_set_auto_reply(message: Message, command: CommandObject) -> None:
         await message.answer(
             f"✅ <b>Автоответ обновлён.</b>\n\n"
             f"<i>{new_value}</i>\n\n"
-            "Теперь каждый раз, когда новый клиент пишет с упоминанием "
-            "источника (insta/youtube/etc.), бот ответит ему этим текстом "
-            "от твоего имени.\n\n"
+            "Теперь каждый раз, когда новый клиент пишет «Я из …», "
+            "бот ответит ему этим текстом от твоего имени.\n\n"
             "⚠ Проверь, что у бота включено «Ответы на сообщения» "
             "в настройках Telegram Business.",
             parse_mode="HTML",

@@ -226,7 +226,12 @@ async def on_business_message(message: Message) -> None:
         # разрешение «Ответы на сообщения». Если нет — send упадёт с
         # TelegramBadRequest и мы просто залогируем без падения хендлера.
         import os
-        auto_reply = os.environ.get("BUSINESS_AUTO_REPLY", "").strip()
+        # Декодируем escape-форму \n обратно в реальные newline.
+        # /setautoreply сохраняет в .env с literal \n, потому что systemd
+        # EnvironmentFile не поддерживает многострочные значения (читает
+        # только до первого newline). Без этого декода клиенты получали
+        # только первую строку автоответа.
+        auto_reply = os.environ.get("BUSINESS_AUTO_REPLY", "").strip().replace("\\n", "\n")
         if auto_reply and message.business_connection_id:
             try:
                 await message.bot.send_message(
