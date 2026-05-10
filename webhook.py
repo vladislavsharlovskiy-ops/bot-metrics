@@ -175,12 +175,43 @@ def prodamus_webhook():
 
     p = extract_payment(nested)
 
-    # Игнорируем не-success
+    # Игнорируем не-success — но владельцу шлём уведомление, чтобы оплаты
+    # не терялись тихо (как утром были потеряны Александр+Никита). Если
+    # Prodamus реально присылает «pending»/«new»/etc и оплата ещё не
+    # успешна, можно проигнорить уведомление; если же это полный «paid»
+    # webhook со странным status-полем — у владельца уже есть готовый
+    # /addpayment в чате чтобы дозаписать.
     if p["payment_status"] not in ("success", "paid"):
-        log.info("Skipped status=%s", p["payment_status"])
+        log.info("Skipped status=%s order_id=%s", p["payment_status"], p["prodamus_id"])
+        try:
+            _notify_owner_unprocessed(
+                title="⚠ <b>Webhook от Prodamus со статусом ≠ success</b>",
+                reason_lines=[
+                    f"Платёж в БД <b>НЕ записан</b> (status=<code>{p['payment_status'] or '—'}</code>).",
+                    "Если оплата реальная и была успешной — дозапиши /addpayment'ом ниже.",
+                    "Если это промежуточное состояние (pending / hold / etc) — игнорь.",
+                ],
+                nested=nested, raw_form=form,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("Failed to notify owner about skipped payment: %s", e)
         return jsonify({"ok": True, "skipped": True})
 
     if not p["prodamus_id"]:
+        log.warning("Webhook без order_id, payload: %s", form)
+        try:
+            _notify_owner_unprocessed(
+                title="⚠ <b>Webhook от Prodamus без order_id</b>",
+                reason_lines=[
+                    "Платёж в БД <b>НЕ записан</b>: Prodamus не передал ни "
+                    "<code>order_id</code>, ни <code>order_num</code> — "
+                    "идентифицировать оплату нечем.",
+                    "Если оплата реальная — дозапиши вручную (готовая команда ниже).",
+                ],
+                nested=nested, raw_form=form,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("Failed to notify owner about no-order_id payment: %s", e)
         return jsonify({"error": "no order_id"}), 400
 
     paid_at = _parse_datetime(p["paid_at"])
@@ -258,9 +289,35 @@ def _payment_header(p: Payment) -> str:
 def _notify_owner_bad_signature(nested: dict, raw_form: dict) -> None:
     """
     Webhook от Prodamus пришёл, но signature не сошлась → платёж в БД НЕ
-    записан, в дашборд НЕ попал. Чтобы оплата не потерялась — отдаём
-    владельцу карточку со всеми данными, которые нашли в payload, и
-    подсказку что делать.
+    записан. Шлём владельцу карточку со всеми полями + готовый /addpayment.
+    """
+    _notify_owner_unprocessed(
+        title="⚠ <b>Webhook от Prodamus с неверной подписью</b>",
+        reason_lines=[
+            "Оплата <b>НЕ записана в БД</b>. Возможные причины:",
+            "• PRODAMUS_SECRET_KEY в .env пустой/неправильный — "
+            "поправь через <code>/setprodamuskey &lt;key&gt;</code>",
+            "• Запрос не от Prodamus (попытка взлома)",
+        ],
+        nested=nested,
+        raw_form=raw_form,
+    )
+
+
+def _notify_owner_unprocessed(
+    title: str,
+    reason_lines: list[str],
+    nested: dict,
+    raw_form: dict,
+) -> None:
+    """
+    Универсальная карточка владельцу: «webhook пришёл, но платёж в БД не
+    записан». Включает все известные поля + готовый JSON для /addpayment,
+    чтобы оплату можно было дозаписать одной командой без копирования
+    из писем.
+
+    Используется для всех skip-кейсов (bad signature / payment_status≠success
+    / no order_id) — чтобы платежи никогда не терялись молча.
     """
     p = extract_payment(nested)
     name = p.get("customer_name") or "—"
@@ -269,27 +326,25 @@ def _notify_owner_bad_signature(nested: dict, raw_form: dict) -> None:
     amount = p.get("amount") or 0
     currency = p.get("currency") or "RUB"
     order_id = p.get("prodamus_id") or raw_form.get("order_id") or "—"
+    status = p.get("payment_status") or raw_form.get("payment_status") or "—"
     product = p.get("product") or "—"
 
-    # JSON-блок, готовый к копированию в /addpayment (если оплата реальная,
-    # но signature пока не проходит — пользователь дозапишет одной командой).
     addpayment_arg = json.dumps(nested, ensure_ascii=False)
-    # Telegram не любит >4096 символов в одном сообщении — обрезаем.
+    # Telegram сообщение ограничено 4096 символами — обрезаем JSON если
+    # длиннее, но оставляем поля платежа выше — они самые важные.
     if len(addpayment_arg) > 3500:
         addpayment_arg = addpayment_arg[:3500] + "…"
 
     text = (
-        "⚠ <b>Webhook от Prodamus с неверной подписью</b>\n\n"
+        f"{title}\n\n"
         f"💰 <b>{amount:.0f} {currency}</b>\n"
         f"👤 {name}\n"
         f"📧 {email}\n"
         f"📱 {phone}\n"
         f"🛍 {product}\n"
-        f"🆔 order_id: <code>{order_id}</code>\n\n"
-        "Оплата <b>НЕ записана в БД</b>. Возможные причины:\n"
-        "• PRODAMUS_SECRET_KEY в .env пустой/неправильный — "
-        "поправь через <code>/setprodamuskey &lt;key&gt;</code>\n"
-        "• Запрос не от Prodamus (попытка взлома)\n\n"
+        f"🆔 order_id: <code>{order_id}</code>\n"
+        f"📦 status: <code>{status}</code>\n\n"
+        + "\n".join(reason_lines) + "\n\n"
         "Если оплата реальная — дозапиши вручную:\n"
         f"<code>/addpayment {addpayment_arg}</code>\n\n"
         "Дальше /fixpay для классификации (привязать к лиду / создать клиента)."

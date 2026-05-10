@@ -1271,19 +1271,25 @@ async def cmd_set_auto_reply(message: Message, command: CommandObject) -> None:
 
 @router.message(Command("purge_orphans"))
 async def cmd_purge_orphans(message: Message) -> None:
-    """Подчистить осиротевшие Clients/Payments после удалений лидов
-    до cascade-delete фикса.
+    """Подчистить осиротевшие Clients/Payments — БЕЗОПАСНАЯ версия.
 
-    Два кейса:
-    1. Client с lead_id IS NULL — originating-лид удалили, но Client
-       остался (FK ondelete=SET NULL). ORM-delete + cascade='all,
-       delete-orphan' стирают его Payments и RepeatSessions.
-    2. Payment с lead_id IS NULL И client_id IS NULL И payment_type
-       IN ('first','repeat') — «дважды осиротевший»: и лид, и клиент
-       уже удалены, но классифицированный платёж остался и попадает
-       в карточку «Первичных оплат» на дашборде. Платежи с
-       payment_type='unclassified' не трогаем — это нормальное
-       состояние свежего webhook'а, ждущего ручной классификации.
+    Раньше эта команда была опасной: удаляла «дважды осиротевшие» Payment
+    с payment_type IN ('first','repeat'), а также cascade-удаляла Payments
+    через orphan-Client. Из-за этого утром потерялись оплаты Александра
+    и Никиты — они были классифицированы (first), но при удалении лида
+    через дашборд Client тоже удалялся, Payment оставался без привязок,
+    и /purge_orphans его «подчищал».
+
+    Теперь правила:
+      1. Classified Payment (first/repeat) — НИКОГДА не удаляем. Это
+         историческая выручка. Если осиротел — просто остаётся в БД.
+      2. Client удаляем только если у него НЕТ classified-оплат
+         (то есть все его платежи unclassified или ignored, либо нет
+         вообще). Cascade в этом случае безопасен — теряем только мусор.
+      3. Sessions удаляются только в составе удалённого client
+         (через ORM cascade).
+
+    /purge_orphans теперь умеет починить ситуацию, не ломая выручку.
     """
     if not _is_owner(message):
         return
@@ -1291,36 +1297,72 @@ async def cmd_purge_orphans(message: Message) -> None:
         orphan_clients = session.execute(
             select(Client).where(Client.lead_id.is_(None))
         ).scalars().all()
-        client_count = len(orphan_clients)
-        payments_via_client = sum(len(c.payments) for c in orphan_clients)
-        sessions_via_client = sum(len(c.sessions) for c in orphan_clients)
-        for c in orphan_clients:
-            session.delete(c)
 
-        result = session.execute(
-            sql_delete(Payment)
+        deleted_clients = 0
+        deleted_unclassified_payments = 0
+        deleted_sessions = 0
+        kept_clients_with_classified = 0
+        kept_classified_payments = 0
+
+        for c in orphan_clients:
+            classified = [p for p in c.payments if p.payment_type in ("first", "repeat")]
+            if classified:
+                # Сохраняем — это выручка. Client остаётся как «orphan client
+                # with revenue»: лида у него нет, но история оплат живая.
+                kept_clients_with_classified += 1
+                kept_classified_payments += len(classified)
+                continue
+            # Все платежи у клиента — unclassified/ignored, либо нет вовсе.
+            # Cascade-delete безопасен: ничего ценного нет.
+            deleted_unclassified_payments += len(c.payments)
+            deleted_sessions += len(c.sessions)
+            session.delete(c)
+            deleted_clients += 1
+
+        # «Дважды осиротевших» classified Payments (нет лида И нет клиента)
+        # — НЕ удаляем больше. Просто считаем для отчёта.
+        bare_classified = session.execute(
+            select(Payment)
             .where(Payment.lead_id.is_(None))
             .where(Payment.client_id.is_(None))
             .where(Payment.payment_type.in_(("first", "repeat")))
-        )
-        bare_payments = result.rowcount or 0
+        ).scalars().all()
+        bare_classified_count = len(bare_classified)
+        bare_total_amount = sum(p.amount or 0 for p in bare_classified)
+
         session.commit()
 
-    total = client_count + payments_via_client + sessions_via_client + bare_payments
-    if total == 0:
+    if (deleted_clients == 0 and deleted_unclassified_payments == 0
+            and deleted_sessions == 0 and kept_clients_with_classified == 0
+            and bare_classified_count == 0):
         await message.answer(
             "🧹 Ничего лишнего не нашёл — БД чистая.",
             parse_mode="HTML",
         )
         return
-    await message.answer(
-        f"🧹 Подчистили:\n"
-        f"• клиентов без лида: {client_count}\n"
-        f"• их платежей: {payments_via_client}\n"
-        f"• их сессий повтора: {sessions_via_client}\n"
-        f"• одиночных «осиротевших» платежей: {bare_payments}",
-        parse_mode="HTML",
-    )
+
+    lines = ["🧹 <b>Purge orphans</b> (безопасный режим)\n"]
+    if deleted_clients or deleted_unclassified_payments or deleted_sessions:
+        lines.append("<b>Удалили (только мусор):</b>")
+        lines.append(f"  • orphan-клиентов без classified-оплат: {deleted_clients}")
+        lines.append(f"  • их unclassified/ignored платежей: {deleted_unclassified_payments}")
+        lines.append(f"  • их сессий повтора: {deleted_sessions}")
+    if kept_clients_with_classified or bare_classified_count:
+        if lines[-1] != "":
+            lines.append("")
+        lines.append("<b>Сохранили</b> (это выручка, удалять нельзя):")
+        if kept_clients_with_classified:
+            lines.append(
+                f"  • orphan-клиентов с classified-оплатами: "
+                f"{kept_clients_with_classified} (платежей: {kept_classified_payments})"
+            )
+        if bare_classified_count:
+            lines.append(
+                f"  • bare classified-оплат (нет ни лида, ни клиента): "
+                f"{bare_classified_count} на сумму {bare_total_amount:.0f} ₽"
+            )
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 # ─── /diag_clients ─────────────────────────────────────────────────
