@@ -38,6 +38,37 @@ ENV_FILE = Path("/opt/bot-metrics/.env")
 REPO_DIR = "/opt/bot-metrics/repo"
 BACKUP_SCRIPT = "/opt/bot-metrics/bin/backup.sh"
 DEPLOY_SCRIPT = "/opt/bot-metrics/bin/deploy.sh"
+# Многострочный автоответ хранится в отдельном файле, а не в .env, потому
+# что systemd EnvironmentFile экранирует/коверкает backslash-последовательности
+# (\n превращается в `n` без переноса). Файл — простой UTF-8, любые символы
+# и переносы строк хранятся as-is.
+AUTO_REPLY_FILE = Path("/opt/bot-metrics/data/business_auto_reply.txt")
+
+
+def _read_auto_reply() -> str:
+    """Возвращает текст автоответа из файла; при отсутствии файла — fallback
+    на переменную окружения (legacy, для обратной совместимости с серверами,
+    где /setautoreply ещё не запускался после фикса)."""
+    try:
+        return AUTO_REPLY_FILE.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        legacy = os.environ.get("BUSINESS_AUTO_REPLY", "").strip()
+        # Старые версии /setautoreply сохраняли с escape \n — пробуем
+        # декодировать на случай, если значение было записано до фикса.
+        return legacy.replace("\\n", "\n")
+    except OSError as e:  # noqa: BLE001
+        log.warning("auto-reply file read failed: %s", e)
+        return ""
+
+
+def _write_auto_reply(value: str) -> str | bool:
+    """Сохраняет текст автоответа в файл. Возвращает True или строку с ошибкой."""
+    try:
+        AUTO_REPLY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        AUTO_REPLY_FILE.write_text(value, encoding="utf-8")
+        return True
+    except Exception as e:  # noqa: BLE001
+        return str(e)
 
 
 def _is_owner(message: Message) -> bool:
@@ -1187,11 +1218,7 @@ async def cmd_get_auto_reply(message: Message) -> None:
     """Показывает текущий текст автоответа на новые заявки в Business-чатах."""
     if not _is_owner(message):
         return
-    raw = os.environ.get("BUSINESS_AUTO_REPLY", "").strip()
-    # Многострочные значения мы храним с escape-формой \n (см. /setautoreply),
-    # потому что systemd EnvironmentFile читает только до первого реального
-    # newline. На дисплее показываем человеку как реальный текст.
-    current = raw.replace("\\n", "\n")
+    current = _read_auto_reply()
     if current:
         await message.answer(
             f"📣 <b>Текущий автоответ на новые заявки:</b>\n\n"
@@ -1234,22 +1261,22 @@ async def cmd_set_auto_reply(message: Message, command: CommandObject) -> None:
     else:
         new_value = arg
 
-    # systemd EnvironmentFile читает .env построчно, KEY=VALUE до первого
-    # newline. Если автоответ многострочный — реальные \n в .env обрежут
-    # значение (как было: «Добрый день! Благодарю за доверие.» — а
-    # остальные строки терялись). Сохраняем с escape: \n → литеральный \n
-    # (два символа). business.py читает env и делает обратную замену.
-    encoded = new_value.replace("\n", "\\n")
-
-    os.environ["BUSINESS_AUTO_REPLY"] = encoded
-    persisted = _persist_env(ENV_FILE, "BUSINESS_AUTO_REPLY", encoded)
-
+    # Сохраняем в отдельный файл (a не в .env). systemd EnvironmentFile
+    # коверкает backslash-последовательности и обрезает на первом реальном
+    # newline — раньше это давало то «Добрый день!» без остальных строк,
+    # то текст с буквами `n` вместо переносов. Текстовый файл — простой
+    # UTF-8, любые символы и переносы хранятся as-is.
+    persisted = _write_auto_reply(new_value)
     if persisted is not True:
         await message.answer(
-            f"⚠ env обновил, но в .env записать не удалось ({persisted}).\n"
-            "После рестарта бота значение откатится."
+            f"⚠ Не удалось сохранить автоответ: {persisted}",
         )
         return
+
+    # На всякий случай чистим устаревшую запись из .env, чтобы legacy-fallback
+    # не подсовывал старое значение если файл вдруг исчезнет.
+    _persist_env(ENV_FILE, "BUSINESS_AUTO_REPLY", "")
+    os.environ.pop("BUSINESS_AUTO_REPLY", None)
 
     if new_value:
         await message.answer(
