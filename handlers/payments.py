@@ -26,7 +26,7 @@ from config import OWNER_ID
 from db import get_session
 from models import Client, Lead, Payment, RepeatSession, StageHistory
 from sheets import sync_lead
-from stages import LEAD_NEW, PAID, REPEAT_PAID, SOURCES
+from stages import LEAD_NEW, PAID, REPEAT_DONE, REPEAT_PAID, SOURCES
 
 
 def _phone_digits(phone):
@@ -376,6 +376,67 @@ async def cb_repeat_new(call: CallbackQuery) -> None:
         parse_mode="HTML",
     )
     await call.answer("Записано")
+
+
+# ───────── /repeats: список RepeatSession в очереди на «проведена» ─────────
+
+@router.message(Command("repeats"))
+async def cmd_repeats(message: Message) -> None:
+    """Показывает все RepeatSession в стадии «Оплачено» (ещё не отмечены
+    проведёнными). Клик на кнопку — переводит в REPEAT_DONE, и сессия
+    попадает в счётчик «Консультаций проведено» в воронке и /month."""
+    if message.from_user and message.from_user.id != OWNER_ID:
+        return
+    with get_session() as session:
+        rows = session.execute(
+            select(RepeatSession, Client)
+            .join(Client, Client.id == RepeatSession.client_id)
+            .where(RepeatSession.stage == REPEAT_PAID)
+            .order_by(RepeatSession.created_at.desc())
+        ).all()
+    if not rows:
+        await message.answer(
+            "🔁 Нет повторок в очереди — все уже отмечены проведёнными ✨"
+        )
+        return
+    buttons: list[list[InlineKeyboardButton]] = []
+    for rs, client in rows:
+        name = client.name or client.phone or f"client#{client.id}"
+        when = rs.created_at.strftime("%d.%m") if rs.created_at else "?"
+        label = f"✅ {name} ({when})"
+        buttons.append([InlineKeyboardButton(
+            text=label[:64],
+            callback_data=f"repeat:done:{rs.id}",
+        )])
+    await message.answer(
+        f"🔁 <b>Повторки в очереди ({len(rows)}):</b>\n\n"
+        "Клик на клиента — пометить «Сессия проведена».",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+
+
+@router.callback_query(F.data.startswith("repeat:done:"))
+async def cb_repeat_done(call: CallbackQuery) -> None:
+    rs_id = int(call.data.split(":")[2])
+    with get_session() as session:
+        rs = session.get(RepeatSession, rs_id)
+        if not rs:
+            await call.answer("Сессия не найдена", show_alert=True)
+            return
+        if rs.stage == REPEAT_DONE:
+            await call.answer("Уже отмечено", show_alert=False)
+            return
+        rs.stage = REPEAT_DONE
+        session.commit()
+        client = session.get(Client, rs.client_id)
+        name = (client.name if client else None) or f"client#{rs.client_id}"
+    await call.message.edit_text(
+        (call.message.text or call.message.html_text or "")
+        + f"\n\n✅ «{name}» — отмечено как проведено.",
+        parse_mode="HTML",
+    )
+    await call.answer("Готово")
 
 
 # ───────── ignore ─────────
