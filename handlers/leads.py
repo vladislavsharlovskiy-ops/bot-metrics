@@ -274,7 +274,15 @@ def _money_short(amount: float) -> str:
 @router.message(Command("clients"))
 @router.message(F.text == BTN_CLIENTS)
 async def cmd_clients(message: Message) -> None:
-    """Список оплативших лидов с суммой выручки от каждого."""
+    """Список оплативших лидов + клиенты без лида («постоянники без лида»).
+
+    Раньше команда показывала только Lead'ов в CLIENT_CODES, поэтому
+    постоянники, занесённые через /addpayment + «Новый постоянник» в
+    /reclassify (у которых есть Client, но нет Lead), не попадали ни в
+    счётчик, ни в выручку. После добавления Александра и Никиты у нас
+    в БД 8 оплат и 8 клиентов, а команда показывала 6 и 30к вместо 50к.
+    Теперь Client.lead_id IS NULL с classified-оплатами тоже учитывается.
+    """
     with get_session() as session:
         # Берём лидов в стадиях клиентов + считаем выручку через Payment
         # (через лид или через привязанного к лиду клиента)
@@ -285,31 +293,29 @@ async def cmd_clients(message: Message) -> None:
             .limit(PAGE_SIZE * 5)
         ).scalars().all()
 
-        if not leads:
-            await message.answer("Клиентов пока нет.\nКогда лид оплатит — появится здесь.")
-            return
-
         # Собираем выручку: все Payment где payment_type IN ('first', 'repeat'),
         # привязанные к лиду напрямую или к клиенту, чей lead_id == lead.id
         lead_ids = [l.id for l in leads]
         client_ids_by_lead: dict[int, list[int]] = {lid: [] for lid in lead_ids}
-        client_rows = session.execute(
-            select(Client.id, Client.lead_id).where(Client.lead_id.in_(lead_ids))
-        ).all()
-        for cid, lid in client_rows:
-            if lid in client_ids_by_lead:
-                client_ids_by_lead[lid].append(cid)
+        if lead_ids:
+            client_rows = session.execute(
+                select(Client.id, Client.lead_id).where(Client.lead_id.in_(lead_ids))
+            ).all()
+            for cid, lid in client_rows:
+                if lid in client_ids_by_lead:
+                    client_ids_by_lead[lid].append(cid)
 
         revenue_by_lead: dict[int, float] = {lid: 0.0 for lid in lead_ids}
         # 1) Платежи, привязанные к лиду напрямую (Payment.lead_id IS NOT NULL)
-        direct = session.execute(
-            select(Payment.lead_id, func.coalesce(func.sum(Payment.amount), 0))
-            .where(Payment.lead_id.in_(lead_ids))
-            .where(Payment.payment_type.in_(["first", "repeat"]))
-            .group_by(Payment.lead_id)
-        ).all()
-        for lid, total in direct:
-            revenue_by_lead[lid] = revenue_by_lead.get(lid, 0) + float(total or 0)
+        if lead_ids:
+            direct = session.execute(
+                select(Payment.lead_id, func.coalesce(func.sum(Payment.amount), 0))
+                .where(Payment.lead_id.in_(lead_ids))
+                .where(Payment.payment_type.in_(["first", "repeat"]))
+                .group_by(Payment.lead_id)
+            ).all()
+            for lid, total in direct:
+                revenue_by_lead[lid] = revenue_by_lead.get(lid, 0) + float(total or 0)
         # 2) Платежи через клиента — но ТОЛЬКО без прямой привязки к лиду,
         # иначе платёж посчитается дважды (через lead_id и через client→lead_id).
         all_client_ids = [c for cids in client_ids_by_lead.values() for c in cids]
@@ -326,22 +332,55 @@ async def cmd_clients(message: Message) -> None:
                 for cid in cids:
                     revenue_by_lead[lid] = revenue_by_lead.get(lid, 0) + client_to_total.get(cid, 0)
 
-    total_revenue = sum(revenue_by_lead.values())
+        # 3) Постоянники без лида — Client.lead_id IS NULL с classified-оплатами.
+        # Это «Новые постоянники» из /reclassify (например, Александр и Никита).
+        orphan_rows = session.execute(
+            select(
+                Client,
+                func.count(Payment.id),
+                func.coalesce(func.sum(Payment.amount), 0),
+            )
+            .join(Payment, Payment.client_id == Client.id)
+            .where(Client.lead_id.is_(None))
+            .where(Payment.payment_type.in_(["first", "repeat"]))
+            .group_by(Client.id)
+            .order_by(func.sum(Payment.amount).desc())
+        ).all()
+
+    if not leads and not orphan_rows:
+        await message.answer("Клиентов пока нет.\nКогда лид оплатит — появится здесь.")
+        return
+
+    total_revenue = sum(revenue_by_lead.values()) + sum(float(t or 0) for _, _, t in orphan_rows)
+    total_count = len(leads) + len(orphan_rows)
+
     items = []
     for lead in leads:
         rev = revenue_by_lead.get(lead.id, 0)
         src = SOURCE_TITLES.get(lead.source, lead.source)
         name = lead.name or lead.username or "—"
         stage = BY_CODE[lead.stage].short
-        # Telegram-кнопка ограничена ~64 символами текста
         label = f"#{lead.id} · {src} · {name} · {stage} · {_money_short(rev)}"
         items.append((lead.id, label[:64]))
 
-    text = (
-        f"💚 <b>Клиенты:</b> {len(leads)}\n"
-        f"Выручка по списку: <b>{_money_short(total_revenue)}</b>"
+    text_parts = [
+        f"💚 <b>Клиенты:</b> {total_count}",
+        f"Выручка по списку: <b>{_money_short(total_revenue)}</b>",
+    ]
+    if orphan_rows:
+        text_parts.append("")
+        text_parts.append(f"<b>Постоянники без лида:</b>")
+        for client, pay_count, total in orphan_rows:
+            name = client.name or client.phone or f"client#{client.id}"
+            text_parts.append(
+                f"  • {name} — {_money_short(float(total or 0))} ({int(pay_count)} оп.)"
+            )
+
+    await message.answer(
+        "\n".join(text_parts),
+        parse_mode="HTML",
+        reply_markup=leads_list_kb(items, 1, False),
     )
-    await message.answer(text, parse_mode="HTML", reply_markup=leads_list_kb(items, 1, False))
 
 
 # ───────── /lead <id> and search ─────────
