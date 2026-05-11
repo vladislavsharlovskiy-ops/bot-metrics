@@ -421,18 +421,22 @@ function dash() {
 
     get summaryCards() {
       if (!this.summary) return [];
-      const firstLeads = this.summary.month.lead_new || 0;
+      // monthLeadNew — это _counts_in_period(scope=this.scope).lead_new,
+      // и в web.py он УЖЕ включает RepeatSession contribution для
+      // scope='all' (см. PR #69). Поэтому для 'all' нельзя прибавлять
+      // repeatSessions ещё раз — получим двойной счёт (баг: 56+2=58
+      // когда должно быть 56). Для 'first' lead_new чистый = только
+      // первички. Для 'repeat' мы lead_new не используем.
+      const monthLeadNew = this.summary.month.lead_new || 0;
       const repeatSessions = this.summary.month_repeat_sessions || 0;
-      // monthLeads (заявок за месяц) зависит от scope:
-      //   - all:    первичные + повторные = все заявки месяца
-      //   - first:  только первичные
-      //   - repeat: только повторные (RepeatSessions)
-      // Это синхронизировано с _month_metrics в web.py — таблица «По месяцам»
-      // показывает ту же логику.
       let monthLeads;
-      if (this.scope === 'first') monthLeads = firstLeads;
+      if (this.scope === 'first') monthLeads = monthLeadNew;
       else if (this.scope === 'repeat') monthLeads = repeatSessions;
-      else monthLeads = firstLeads + repeatSessions;
+      else monthLeads = monthLeadNew; // 'all' — уже сумма
+      // pure-first (для подписи «X первичка + Y повторка») считаем как
+      // monthLeadNew - repeatSessions: для scope='all' даст 56-2=54;
+      // для других scope подпись не используется.
+      const pureFirstLeads = Math.max(0, monthLeadNew - repeatSessions);
       const monthPayments = this.summary.month_payments || 0;
       const monthClients = this.summary.month_clients || 0;
       const monthRevenue = this.summary.month_revenue || 0;
@@ -461,7 +465,7 @@ function dash() {
       const paymentsLabel = this.scope === 'first' ? 'Первичных оплат' : 'Оплат за месяц';
       const leadsLabel = this.scope === 'first' ? 'Заявок за месяц' : 'Заявок за месяц';
       const leadsHint = this.scope === 'all' && repeatSessions
-        ? `${firstLeads} первичка + ${repeatSessions} повторка`
+        ? `${pureFirstLeads} первичка + ${repeatSessions} повторка`
         : monthLabel;
 
       return [
