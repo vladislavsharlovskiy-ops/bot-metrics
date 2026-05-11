@@ -29,6 +29,7 @@ from stages import (
     PACKAGE_BOUGHT,
     PACKAGE_DECLINED,
     QUALIFIED,
+    REPEAT_DONE,
     SOURCES,
     SOURCE_TITLES,
     codes_at_or_after,
@@ -117,9 +118,23 @@ def _counts_in_period(start, end, source=None):
 
     Использует codes_at_or_after из stages.py, в котором AGREED включён
     в полный порядок этапов даже несмотря на то, что AGREED убран из
-    отображаемого FUNNEL — это нужно чтобы существующие лиды на этапе
-    AGREED (по запросу пользователя удалили из видимой воронки) всё
-    равно попадали в счёт ранних этапов.
+    отображаемого FUNNEL.
+
+    Дополнительно — суммируем contribution от RepeatSession (повторных
+    оплат от существующих клиентов, не имеющих Lead). RepeatSession
+    создаётся при «Новый постоянник» в /reclassify (как у Александра
+    и Никиты) — у них нет Lead, поэтому в StageHistory они не
+    отражаются, но это всё равно валидная Заявка/Оплата/Консультация:
+      - LEAD_NEW («Заявка»):  каждая RepeatSession = +1
+      - PAID («Оплата»):      каждая RepeatSession = +1 (создаётся уже
+                              как оплаченная)
+      - CONSULTED («Консультация»): RepeatSession с stage=REPEAT_DONE = +1
+    Без этого воронка показывала «Оплата: 6», когда в карточке наверху
+    «Оплат: 8» — рассинхрон, который видел владелец.
+
+    Per-channel view (source=...) не augment'ится повторками, т.к. у
+    повторок нет однозначного источника (Lead удалён) — лучше показать
+    только lead-funnel attribution.
     """
     out = {}
     with get_session() as session:
@@ -134,6 +149,30 @@ def _counts_in_period(start, end, source=None):
             if source:
                 q = q.join(Lead, Lead.id == StageHistory.lead_id).where(Lead.source == source)
             out[s.code] = session.execute(q).scalar_one()
+
+        if source is None:
+            # Все RepeatSession, созданные в периоде = повторные заявки +
+            # повторные оплаты.
+            repeat_created = session.execute(
+                select(func.count(RepeatSession.id))
+                .where(RepeatSession.created_at >= start)
+                .where(RepeatSession.created_at < end)
+            ).scalar_one() or 0
+            # «Проведено» — RepeatSession с stage REPEAT_DONE, созданные в
+            # этом же периоде. Если владелец продвинет старую сессию в
+            # REPEAT_DONE — она попадёт в счёт периода, в котором была
+            # СОЗДАНА (по created_at), а не в текущий. Это согласовано с
+            # тем, как Lead-funnel считает CONSULTED — по StageHistory.
+            repeat_done = session.execute(
+                select(func.count(RepeatSession.id))
+                .where(RepeatSession.stage == REPEAT_DONE)
+                .where(RepeatSession.created_at >= start)
+                .where(RepeatSession.created_at < end)
+            ).scalar_one() or 0
+
+            out[LEAD_NEW] = out.get(LEAD_NEW, 0) + repeat_created
+            out[PAID] = out.get(PAID, 0) + repeat_created
+            out[CONSULTED] = out.get(CONSULTED, 0) + repeat_done
     return out
 
 
