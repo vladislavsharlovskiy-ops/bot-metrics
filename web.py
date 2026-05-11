@@ -111,68 +111,68 @@ def _repeat_sessions_count(start, end) -> int:
         ).scalar_one() or 0)
 
 
-def _counts_in_period(start, end, source=None):
+def _counts_in_period(start, end, source=None, scope="all"):
     """
-    Сколько лидов «достигли этапа X или дальше» в периоде [start, end).
+    Сколько событий «достигли этапа X или дальше» в периоде [start, end).
     Воронка строго монотонна: Заявка ≥ Квал ≥ Разбор ≥ Оплата ≥ ...
 
-    Использует codes_at_or_after из stages.py, в котором AGREED включён
-    в полный порядок этапов даже несмотря на то, что AGREED убран из
-    отображаемого FUNNEL.
+    scope управляет, какую часть событий считать:
+      - "all"    — первички (Lead-funnel) + повторки (RepeatSession)
+      - "first"  — только первички (Lead-funnel) → вкладка «Новые клиенты»
+      - "repeat" — только повторки (RepeatSession) → вкладка «Постоянные»
 
-    Дополнительно — суммируем contribution от RepeatSession (повторных
-    оплат от существующих клиентов, не имеющих Lead). RepeatSession
-    создаётся при «Новый постоянник» в /reclassify (как у Александра
-    и Никиты) — у них нет Lead, поэтому в StageHistory они не
-    отражаются, но это всё равно валидная Заявка/Оплата/Консультация:
-      - LEAD_NEW («Заявка»):  каждая RepeatSession = +1
-      - PAID («Оплата»):      каждая RepeatSession = +1 (создаётся уже
-                              как оплаченная)
-      - CONSULTED («Консультация»): RepeatSession с stage=REPEAT_DONE = +1
-    Без этого воронка показывала «Оплата: 6», когда в карточке наверху
-    «Оплат: 8» — рассинхрон, который видел владелец.
+    Lead-funnel contributions:
+      Считаем по StageHistory + Lead. Использует codes_at_or_after из
+      stages.py — лиды на более поздних этапах учитываются для всех более
+      ранних. AGREED включён в полный порядок этапов даже несмотря на
+      то, что убран из отображаемого FUNNEL.
 
-    Per-channel view (source=...) не augment'ится повторками, т.к. у
-    повторок нет однозначного источника (Lead удалён) — лучше показать
-    только lead-funnel attribution.
+    Repeat-funnel contributions (только когда source is None):
+      RepeatSession создаётся при «Новый постоянник» в /reclassify
+      (как у Александра/Никиты). У них нет Lead'а, в StageHistory они не
+      отражаются. Поэтому считаем отдельно:
+        - LEAD_NEW («Заявка»):        RepeatSession.created_at в периоде
+        - PAID    («Оплата»):         RepeatSession.created_at в периоде
+                                       (создаётся уже как оплаченная)
+        - CONSULTED («Консультация»): RepeatSession.stage = REPEAT_DONE и
+                                       created_at в периоде
+
+    Per-channel view (source != None) — только Lead-funnel: у повторок нет
+    однозначного источника (Lead удалён), attribution по каналам только
+    через лидов.
     """
-    out = {}
+    out = {s.code: 0 for s in FUNNEL}
     with get_session() as session:
-        for s in FUNNEL:
-            later_codes = codes_at_or_after(s.code)
-            q = (
-                select(func.count(func.distinct(StageHistory.lead_id)))
-                .where(StageHistory.stage.in_(later_codes))
-                .where(StageHistory.changed_at >= start)
-                .where(StageHistory.changed_at < end)
-            )
-            if source:
-                q = q.join(Lead, Lead.id == StageHistory.lead_id).where(Lead.source == source)
-            out[s.code] = session.execute(q).scalar_one()
+        # 1) Lead-funnel
+        if scope in ("all", "first"):
+            for s in FUNNEL:
+                later_codes = codes_at_or_after(s.code)
+                q = (
+                    select(func.count(func.distinct(StageHistory.lead_id)))
+                    .where(StageHistory.stage.in_(later_codes))
+                    .where(StageHistory.changed_at >= start)
+                    .where(StageHistory.changed_at < end)
+                )
+                if source:
+                    q = q.join(Lead, Lead.id == StageHistory.lead_id).where(Lead.source == source)
+                out[s.code] += session.execute(q).scalar_one()
 
-        if source is None:
-            # Все RepeatSession, созданные в периоде = повторные заявки +
-            # повторные оплаты.
+        # 2) Repeat-funnel — только без source (повторки не имеют канала)
+        if scope in ("all", "repeat") and source is None:
             repeat_created = session.execute(
                 select(func.count(RepeatSession.id))
                 .where(RepeatSession.created_at >= start)
                 .where(RepeatSession.created_at < end)
             ).scalar_one() or 0
-            # «Проведено» — RepeatSession с stage REPEAT_DONE, созданные в
-            # этом же периоде. Если владелец продвинет старую сессию в
-            # REPEAT_DONE — она попадёт в счёт периода, в котором была
-            # СОЗДАНА (по created_at), а не в текущий. Это согласовано с
-            # тем, как Lead-funnel считает CONSULTED — по StageHistory.
             repeat_done = session.execute(
                 select(func.count(RepeatSession.id))
                 .where(RepeatSession.stage == REPEAT_DONE)
                 .where(RepeatSession.created_at >= start)
                 .where(RepeatSession.created_at < end)
             ).scalar_one() or 0
-
-            out[LEAD_NEW] = out.get(LEAD_NEW, 0) + repeat_created
-            out[PAID] = out.get(PAID, 0) + repeat_created
-            out[CONSULTED] = out.get(CONSULTED, 0) + repeat_done
+            out[LEAD_NEW] += repeat_created
+            out[PAID] += repeat_created
+            out[CONSULTED] += repeat_done
     return out
 
 
@@ -207,9 +207,9 @@ def api_summary():
     today_s, today_e = _today_range()
     week_s, week_e = _week_range()
     month_s, month_e = _month_range()
-    today = _counts_in_period(today_s, today_e)
-    week = _counts_in_period(week_s, week_e)
-    month = _counts_in_period(month_s, month_e)
+    today = _counts_in_period(today_s, today_e, scope=scope)
+    week = _counts_in_period(week_s, week_e, scope=scope)
+    month = _counts_in_period(month_s, month_e, scope=scope)
 
     with get_session() as session:
         total_active = session.execute(
@@ -413,22 +413,32 @@ def api_months():
     return jsonify({"months": active or months[:1], "scope": scope})
 
 
-@app.get("/api/period/<scope>")
-def api_period(scope: str):
-    if scope == "today":
+@app.get("/api/period/<period>")
+def api_period(period: str):
+    """Воронка за период с фильтром по типу клиентов.
+
+    URL: /api/period/<period>?scope=<scope>
+      period — today | week | month
+      scope  — all (default) | first | repeat (см. _counts_in_period)
+    """
+    if period == "today":
         s, e = _today_range()
         label = f"Сегодня ({s:%d.%m.%Y})"
-    elif scope == "week":
+    elif period == "week":
         s, e = _week_range()
         label = f"Неделя ({s:%d.%m} – {(e - timedelta(seconds=1)):%d.%m})"
-    elif scope == "month":
+    elif period == "month":
         s, e = _month_range()
         label = f"Месяц ({s:%B %Y})"
     else:
-        return jsonify({"error": "bad scope"}), 400
-    counts = _counts_in_period(s, e)
+        return jsonify({"error": "bad period"}), 400
+    data_scope = (request.args.get("scope") or "all").lower()
+    if data_scope not in ("all", "first", "repeat"):
+        data_scope = "all"
+    counts = _counts_in_period(s, e, scope=data_scope)
     return jsonify({
         "label": label,
+        "scope": data_scope,
         "stages": [
             {"code": st.code, "title": st.title, "short": st.short, "count": counts.get(st.code, 0)}
             for st in FUNNEL

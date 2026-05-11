@@ -508,7 +508,11 @@ function dash() {
     async setScope(scope) {
       if (this.scope === scope) return;
       this.scope = scope;
-      await Promise.all([this.loadSummary(), this.loadMonths()]);
+      await Promise.all([
+        this.loadSummary(),
+        this.loadMonths(),
+        this.loadFunnelByPeriod(),
+      ]);
     },
 
     async loadChannels() {
@@ -527,7 +531,11 @@ function dash() {
     },
 
     async loadFunnelByPeriod() {
-      const r = await fetch('/api/period/' + this.period);
+      // Передаём data-scope (first/repeat/all) — чтобы воронка на вкладках
+      // показывала ту же фильтрацию что и карточки шапки. Без этого «Новые
+      // клиенты» показывала бы суммированную воронку (lead + repeat),
+      // а карточка «Первичных оплат» — только первичку. Рассинхрон.
+      const r = await fetch('/api/period/' + this.period + '?scope=' + this.scope);
       const d = await r.json();
       this.funnel = { stages: d.stages, lost: 0 };
       this.periodData = d;

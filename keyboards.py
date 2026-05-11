@@ -24,12 +24,14 @@ BTN_DASHBOARD = "🌐 Дашборд"
 
 
 def main_menu_kb() -> ReplyKeyboardMarkup:
+    # «Сегодня» убрали по просьбе владельца — суточные срезы дают шум на
+    # малых числах и не дают полезного сигнала. Воронки — только Неделя и
+    # Месяц, синхронизированы с вкладкой «Все» на дашборде.
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=BTN_NEW), KeyboardButton(text=BTN_LEADS), KeyboardButton(text=BTN_CLIENTS)],
-            [KeyboardButton(text=BTN_IGNORING), KeyboardButton(text=BTN_TODAY), KeyboardButton(text=BTN_WEEK)],
-            [KeyboardButton(text=BTN_MONTH), KeyboardButton(text=BTN_CHANNELS), KeyboardButton(text=BTN_FUNNEL)],
-            [KeyboardButton(text=BTN_DASHBOARD)],
+            [KeyboardButton(text=BTN_IGNORING), KeyboardButton(text=BTN_WEEK), KeyboardButton(text=BTN_MONTH)],
+            [KeyboardButton(text=BTN_CHANNELS), KeyboardButton(text=BTN_FUNNEL), KeyboardButton(text=BTN_DASHBOARD)],
         ],
         resize_keyboard=True,
         is_persistent=True,

@@ -34,6 +34,7 @@ from stages import (
     PACKAGE_BOUGHT,
     PAID,
     QUALIFIED,
+    REPEAT_DONE,
     codes_at_or_after,
     SOURCE_TITLES,
     SOURCES,
@@ -138,6 +139,20 @@ def _repeat_sessions_count(start: datetime, end: datetime) -> int:
         ).scalar_one() or 0)
 
 
+def _repeat_done_count(start: datetime, end: datetime) -> int:
+    """RepeatSession в стадии REPEAT_DONE, созданные в периоде. Это
+    «проведённые повторки» — суммируются с lead-funnel CONSULTED для
+    общей метрики «Консультаций проведено»."""
+    from models import RepeatSession
+    with get_session() as session:
+        return int(session.execute(
+            select(func.count(RepeatSession.id))
+            .where(RepeatSession.stage == REPEAT_DONE)
+            .where(RepeatSession.created_at >= start)
+            .where(RepeatSession.created_at < end)
+        ).scalar_one() or 0)
+
+
 def _pct(numer: int, denom: int) -> str:
     if denom == 0:
         return "—"
@@ -146,16 +161,20 @@ def _pct(numer: int, denom: int) -> str:
 
 def _format_period_report(title: str, start: datetime, end: datetime, counts: dict[str, int]) -> str:
     """
-    Отчёт за период. «Заявок» = первичные лиды + повторные RepeatSessions
-    (синхронизировано с дашбордом, вкладка «Все»). «Оплат» = реальное число
-    Payment-записей (первичка + повторка). Конверсии считаются от total leads.
+    Отчёт за период. Синхронизирован с дашбордом, вкладка «Все»:
+      Заявок         = lead-funnel LEAD_NEW + RepeatSessions
+      Оплат          = все Payment (first + repeat) — берём из Payment-таблицы
+      Консультаций   = lead-funnel CONSULTED + RepeatSession.REPEAT_DONE
+    Конверсии считаются от total leads.
     """
     first_leads = counts.get(LEAD_NEW, 0)
     repeat_sessions = _repeat_sessions_count(start, end)
+    repeat_done = _repeat_done_count(start, end)
     total_leads = first_leads + repeat_sessions
     payments = _payments_count(start, end)
     counts_for_display = dict(counts)
     counts_for_display[PAID] = payments
+    counts_for_display[CONSULTED] = counts.get(CONSULTED, 0) + repeat_done
 
     lines = [f"📊 <b>{title}</b>"]
     for code, label in STAGES_FOR_REPORT:
