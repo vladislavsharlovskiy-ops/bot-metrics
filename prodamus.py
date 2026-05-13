@@ -18,6 +18,12 @@ from typing import Any, Dict
 
 
 PRODAMUS_SECRET = os.environ.get("PRODAMUS_SECRET_KEY", "")
+# Подписочный продукт в Prodamus может иметь СВОЙ секретный ключ
+# (раздел «Подписки → Общие настройки → секретный ключ»). Если задан,
+# verify() пробует оба секрета и принимает webhook от любого из
+# продуктов — одноразового и подписочного. Без этого подписочные
+# уведомления валятся с bad signature.
+PRODAMUS_SUBSCRIPTION_SECRET = os.environ.get("PRODAMUS_SUBSCRIPTION_SECRET_KEY", "")
 
 
 def _sort_recursive(obj: Any) -> Any:
@@ -37,9 +43,26 @@ def _build_signature(data: Dict[str, Any], secret: str) -> str:
 
 
 def verify(data: Dict[str, Any], provided_signature: str, secret: str | None = None) -> bool:
-    """Проверка подписи incoming webhook от Prodamus."""
-    secret = secret or PRODAMUS_SECRET
-    if not secret or not provided_signature:
+    """Проверка подписи incoming webhook от Prodamus.
+
+    Если передан явный `secret` — проверяет только им (back-compat для тестов).
+    Иначе пробует оба настроенных секрета:
+      - PRODAMUS_SECRET_KEY              — одноразовые продукты
+      - PRODAMUS_SUBSCRIPTION_SECRET_KEY — подписочные продукты (1990 ₽/мес и т.п.)
+    Достаточно совпасть с любым — webhook принимается.
+    """
+    if not provided_signature:
+        return False
+    if secret is not None:
+        return _verify_one(data, provided_signature, secret)
+    for candidate in (PRODAMUS_SECRET, PRODAMUS_SUBSCRIPTION_SECRET):
+        if candidate and _verify_one(data, provided_signature, candidate):
+            return True
+    return False
+
+
+def _verify_one(data: Dict[str, Any], provided_signature: str, secret: str) -> bool:
+    if not secret:
         return False
     expected = _build_signature(data, secret)
     return hmac.compare_digest(expected.lower(), provided_signature.lower())

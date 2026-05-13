@@ -693,6 +693,65 @@ async def cmd_set_prodamus_key(message: Message, command: CommandObject) -> None
         await message.answer(f"⚠ Ошибка: {e}")
 
 
+# ─── /setprodamus_sub_key — подписочный продукт ────────────────────
+#
+# Подписочный продукт Prodamus имеет ОТДЕЛЬНЫЙ secret key (раздел
+# «Подписки → Общие настройки»). webhook'и с автосписаний по подписке
+# подписываются этим ключом, а наш основной PRODAMUS_SECRET_KEY его
+# не знает → bad signature → платёж теряется.
+#
+# Эта команда кладёт подписочный секрет в PRODAMUS_SUBSCRIPTION_SECRET_KEY
+# и рестартует web — prodamus.verify() теперь принимает webhook'и от
+# обоих продуктов (одноразовый + подписка).
+
+@router.message(Command("setprodamus_sub_key"))
+async def cmd_set_prodamus_sub_key(message: Message, command: CommandObject) -> None:
+    if not _is_owner(message):
+        return
+    arg = (command.args or "").strip()
+    if not arg or len(arg) < 10:
+        await message.answer(
+            "Использование: <code>/setprodamus_sub_key твой_подписочный_secret</code>\n\n"
+            "Где взять: panel.prodamus.ru → <b>Подписки</b> → "
+            "<b>Общие настройки</b> → секретный ключ.\n\n"
+            "Это <i>отдельный</i> ключ от основного (для одноразовых "
+            "продуктов). Webhook'и с автосписаний подписки подписываются им.\n\n"
+            "⚠ После выполнения сообщение удали — ключ виден в истории чата.",
+            parse_mode="HTML",
+        )
+        return
+
+    persisted = _persist_env(ENV_FILE, "PRODAMUS_SUBSCRIPTION_SECRET_KEY", arg)
+    if persisted is not True:
+        await message.answer(f"⚠ Не удалось записать в .env: {persisted}")
+        return
+
+    await message.answer(
+        "🔄 Подписочный ключ записан. Перезапускаю web-сервис…"
+    )
+    try:
+        r = subprocess.run(
+            ["sudo", "/bin/systemctl", "restart", "bot-metrics-web"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode == 0:
+            await message.answer(
+                "✅ Готово. Webhook /webhook/prodamus теперь принимает оплаты "
+                "и от одноразовых, и от подписочных продуктов.\n\n"
+                "Дальше укажи в Prodamus URL для уведомлений о подписке:\n"
+                "<code>https://dashboard.sharlovsky.pro/webhook/prodamus</code>\n\n"
+                "⚠ Удали сообщение с ключом.",
+                parse_mode="HTML",
+            )
+        else:
+            await message.answer(
+                f"⚠ Restart не удался:\n<pre>{r.stderr[:1000]}</pre>",
+                parse_mode="HTML",
+            )
+    except Exception as e:  # noqa: BLE001
+        await message.answer(f"⚠ Ошибка: {e}")
+
+
 # ─── /deployurl ────────────────────────────────────────────────────
 
 @router.message(Command("deployurl"))
