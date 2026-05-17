@@ -183,6 +183,11 @@ def index():
     return render_template("dashboard.html")
 
 
+@app.get("/board")
+def board():
+    return render_template("board.html")
+
+
 # ───────── API ─────────
 
 @app.get("/api/summary")
@@ -627,6 +632,73 @@ def api_requests_csv():
         f'attachment; filename="requests-{today}.csv"'
     )
     return response
+
+
+@app.post("/api/leads/<int:lead_id>/move")
+def api_move(lead_id: int):
+    """Универсальный переход лида в произвольный этап.
+
+    Используется Kanban-доской при drag-drop карточки в другую колонку.
+    В отличие от /advance не требует двигаться строго по next_stage —
+    можно подвинуть напрямую в LOST, IGNORING, или назад по воронке
+    (например откатить ошибочно поставленную «Оплата»).
+
+    Body: {"stage": "lead_new"|"qualified"|..., "reason": "..."}
+    """
+    body = request.get_json(silent=True) or {}
+    target = (body.get("stage") or "").strip()
+    if not target:
+        return jsonify({"error": "stage required"}), 400
+    if target not in BY_CODE and target not in (LOST, IGNORING):
+        return jsonify({"error": "unknown stage"}), 400
+    with get_session() as session:
+        lead = session.get(Lead, lead_id)
+        if not lead:
+            return jsonify({"error": "not found"}), 404
+        if lead.stage == target:
+            return jsonify({"lead": _lead_dict(lead), "noop": True})
+        lead.stage = target
+        # LOST дополнительно может принять reason (опционально)
+        if target == LOST:
+            reason = (body.get("reason") or "").strip() or None
+            lead.lost_reason = reason
+        session.add(StageHistory(lead_id=lead.id, stage=target))
+        session.commit()
+        session.refresh(lead)
+    _try_sheets_sync(lead_id)
+    return jsonify({"lead": _lead_dict(lead)})
+
+
+@app.get("/api/board")
+def api_board():
+    """Возвращает лидов сгруппированных по этапам для Kanban-доски.
+    Только активные стадии воронки (LEAD_NEW → PACKAGE_BOUGHT и
+    PACKAGE_DECLINED). LOST/IGNORING идут отдельной страницей-архивом.
+    """
+    board_stages = [s.code for s in FUNNEL] + [PACKAGE_DECLINED]
+    with get_session() as session:
+        rows = session.execute(
+            select(Lead)
+            .where(Lead.stage.in_(board_stages))
+            .order_by(Lead.updated_at.desc())
+        ).scalars().all()
+    by_stage: dict[str, list[dict]] = {code: [] for code in board_stages}
+    for lead in rows:
+        by_stage.setdefault(lead.stage, []).append(_lead_dict(lead))
+    columns = [
+        {"code": s.code, "title": s.title, "short": s.short, "leads": by_stage.get(s.code, [])}
+        for s in FUNNEL
+    ]
+    # PACKAGE_DECLINED — в конец, как «без пакета»
+    declined_stage = BY_CODE.get(PACKAGE_DECLINED)
+    if declined_stage:
+        columns.append({
+            "code": PACKAGE_DECLINED,
+            "title": declined_stage.title,
+            "short": declined_stage.short,
+            "leads": by_stage.get(PACKAGE_DECLINED, []),
+        })
+    return jsonify({"columns": columns})
 
 
 @app.get("/api/stages")

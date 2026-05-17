@@ -70,6 +70,9 @@
       <p class="text-slate-500 text-xs sm:text-sm mt-0.5" x-text="todayLabel"></p>
     </div>
     <div class="flex gap-2">
+      <a href="/board" class="flex-1 sm:flex-none px-3 py-2 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 text-sm font-medium flex items-center justify-center gap-2 no-underline text-slate-700">
+        🗂 Канбан
+      </a>
       <button @click="refreshAll()" class="flex-1 sm:flex-none px-3 py-2 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 text-sm font-medium flex items-center justify-center gap-2">
         <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
         Обновить
