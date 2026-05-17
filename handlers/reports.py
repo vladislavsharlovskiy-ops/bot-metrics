@@ -80,7 +80,6 @@ def _period_label(start: datetime, end: datetime) -> str:
 # («согласие = это и есть оплата, не нужно отдельно»).
 STAGES_FOR_REPORT = [
     (LEAD_NEW,        "Заявок"),
-    (QUALIFIED,       "Квал"),
     (BREAKDOWN_SENT,  "Разборов отправлено"),
     (PAID,            "Оплат"),
     (CONSULTED,       "Консультаций проведено"),

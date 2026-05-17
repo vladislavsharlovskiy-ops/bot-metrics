@@ -672,10 +672,10 @@ def api_move(lead_id: int):
 @app.get("/api/board")
 def api_board():
     """Возвращает лидов сгруппированных по этапам для Kanban-доски.
-    Только активные стадии воронки (LEAD_NEW → PACKAGE_BOUGHT и
-    PACKAGE_DECLINED). LOST/IGNORING идут отдельной страницей-архивом.
+    Колонки: все этапы FUNNEL + IGNORING + LOST. PACKAGE_DECLINED убран
+    из доски по запросу владельца (выпадает из работы вообще).
     """
-    board_stages = [s.code for s in FUNNEL] + [PACKAGE_DECLINED]
+    board_stages = [s.code for s in FUNNEL] + [IGNORING, LOST]
     with get_session() as session:
         rows = session.execute(
             select(Lead)
@@ -689,15 +689,19 @@ def api_board():
         {"code": s.code, "title": s.title, "short": s.short, "leads": by_stage.get(s.code, [])}
         for s in FUNNEL
     ]
-    # PACKAGE_DECLINED — в конец, как «без пакета»
-    declined_stage = BY_CODE.get(PACKAGE_DECLINED)
-    if declined_stage:
-        columns.append({
-            "code": PACKAGE_DECLINED,
-            "title": declined_stage.title,
-            "short": declined_stage.short,
-            "leads": by_stage.get(PACKAGE_DECLINED, []),
-        })
+    # IGNORING + LOST — в конец как «архивные» колонки
+    columns.append({
+        "code": IGNORING,
+        "title": IGNORING_STAGE.title,
+        "short": IGNORING_STAGE.short,
+        "leads": by_stage.get(IGNORING, []),
+    })
+    columns.append({
+        "code": LOST,
+        "title": LOST_STAGE.title,
+        "short": LOST_STAGE.short,
+        "leads": by_stage.get(LOST, []),
+    })
     return jsonify({"columns": columns})
 
 
@@ -817,7 +821,9 @@ def api_revive(lead_id: int):
             .order_by(StageHistory.changed_at.desc())
             .limit(1)
         ).scalars().first()
-        target = prev.stage if prev else "qualified"
+        # Fallback в LEAD_NEW (раньше был "qualified", но мы этот этап
+        # убрали — см. stages.py). LEAD_NEW = «заявка пришла», нейтрально.
+        target = prev.stage if prev else LEAD_NEW
         lead.stage = target
         lead.lost_reason = None
         session.add(StageHistory(lead_id=lead.id, stage=target))

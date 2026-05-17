@@ -46,6 +46,15 @@ def _run_migrations() -> None:
             conn.execute(text("ALTER TABLE leads ADD COLUMN telegram_user_id INTEGER"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_leads_telegram_user_id ON leads(telegram_user_id)"))
 
+        # QUALIFIED убран как этап (см. stages.py). Существующих лидов на
+        # этом stage переводим в BREAKDOWN_SENT — пользователь сам сказал
+        # «разбор отправляю всем квалам всегда», эти лиды и так туда
+        # были бы продвинуты. Идемпотентно: на втором запуске никого
+        # не найдёт.
+        conn.execute(text(
+            "UPDATE leads SET stage = 'breakdown_sent' WHERE stage = 'qualified'"
+        ))
+
 
 def get_session() -> Session:
     return SessionLocal()

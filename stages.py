@@ -21,22 +21,25 @@ class Stage:
     short: str
 
 
-# AGREED («Согласие на консультацию») убран из FUNNEL display-списка по
-# запросу пользователя: «согласие — это и есть оплата». Stage-код остался
-# определённым для обратной совместимости с существующими лидами в БД и
-# для cumulative-учёта (см. ALL_FUNNEL_CODES_ORDERED ниже).
+# QUALIFIED убран из FUNNEL display-списка по запросу пользователя:
+# «разбор отправляю всем квалам всегда, отдельный этап Квал не нужен».
+# Stage-код остался определённым для обратной совместимости с
+# существующими лидами в БД и для cumulative-учёта (ALL_FUNNEL_CODES_ORDERED).
+# Существующие QUALIFIED-лиды мигрируются в BREAKDOWN_SENT на старте
+# бота (см. db.init_db).
+#
+# AGREED тоже убран из FUNNEL — «согласие — это и есть оплата».
 FUNNEL: list[Stage] = [
     Stage(LEAD_NEW,        "Заявка пришла",            "Заявка"),
-    Stage(QUALIFIED,       "Квал. заявка",             "Квал"),
     Stage(BREAKDOWN_SENT,  "Разбор отправлен",         "Разбор"),
     Stage(PAID,            "Оплата консультации",      "Оплата"),
     Stage(CONSULTED,       "Консультация проведена",   "Консультация"),
     Stage(PACKAGE_BOUGHT,  "Куплен пакет / почасово",  "Пакет"),
 ]
 
-# Полный порядок этапов с AGREED — для cumulative counting в воронке
-# (count «лиды на этом этапе ИЛИ позже»). AGREED включён, чтобы лиды,
-# застрявшие на этом этапе, попадали в счёт более ранних этапов.
+# Полный порядок этапов с QUALIFIED+AGREED — для cumulative counting в
+# воронке (count «лиды на этом этапе ИЛИ позже»). Старые этапы включены,
+# чтобы лиды на них попадали в счёт более ранних этапов.
 ALL_FUNNEL_CODES_ORDERED: list[str] = [
     LEAD_NEW, QUALIFIED, BREAKDOWN_SENT, AGREED,
     PAID, CONSULTED, PACKAGE_BOUGHT,
@@ -52,8 +55,11 @@ def codes_at_or_after(stage_code: str) -> list[str]:
         return [stage_code]
 
 
-# Stage-объект AGREED оставлен в BY_CODE — иначе для существующих лидов на
-# этом этапе UI ломается (например, /lead в боте показывает stage_title).
+# Stage-объекты QUALIFIED+AGREED оставлены в BY_CODE — иначе для
+# существующих лидов на этих этапах UI ломается (например, /lead в боте
+# показывает stage_title). После миграции QUALIFIED→BREAKDOWN_SENT
+# таких лидов быть не должно, но код страховочный.
+_QUALIFIED_STAGE = Stage(QUALIFIED, "Квал. заявка", "Квал")
 _AGREED_STAGE = Stage(AGREED, "Согласие на консультацию", "Согласие")
 
 LOST_STAGE = Stage(LOST, "Лид отвалился", "Отвал")
@@ -66,11 +72,11 @@ IGNORING_STAGE = Stage(IGNORING, "Игнорит", "Игнор")
 PACKAGE_DECLINED_STAGE = Stage(PACKAGE_DECLINED, "Без пакета", "Без пакета")
 
 BY_CODE: dict[str, Stage] = {
-    s.code: s for s in [*FUNNEL, _AGREED_STAGE, LOST_STAGE, IGNORING_STAGE, PACKAGE_DECLINED_STAGE]
+    s.code: s for s in [*FUNNEL, _QUALIFIED_STAGE, _AGREED_STAGE, LOST_STAGE, IGNORING_STAGE, PACKAGE_DECLINED_STAGE]
 }
 
-# Активные = лиды, которые ещё не оплатили. AGREED оставлен для обратной
-# совместимости с существующими лидами на этом этапе.
+# Активные = лиды, которые ещё не оплатили. QUALIFIED+AGREED оставлены
+# для обратной совместимости с существующими лидами.
 ACTIVE_CODES = {LEAD_NEW, QUALIFIED, BREAKDOWN_SENT, AGREED}
 # Клиенты = тот, кто уже оплатил (хоть консультацию, хоть пакет).
 CLIENT_CODES = {PAID, CONSULTED, PACKAGE_BOUGHT}
@@ -79,12 +85,14 @@ IGNORING_CODES = {IGNORING}
 
 def next_stage(current: str) -> Stage | None:
     """Следующий этап в воронке. Special-cases:
-    - AGREED → PAID: AGREED убран из FUNNEL list, но лиды на нём
-      должны продвигаться по /advance.
+    - QUALIFIED → BREAKDOWN_SENT: QUALIFIED убран из FUNNEL,
+      но старые лиды на нём должны двигаться вперёд.
+    - AGREED → PAID: AGREED тоже убран из FUNNEL.
     - PACKAGE_DECLINED → PACKAGE_BOUGHT: если клиент после «Без пакета»
-      всё-таки купил пакет, кнопка «Дальше» в карточке отправит его
-      в PACKAGE_BOUGHT, и он снова попадёт во вкладку «Клиенты».
+      всё-таки купил пакет, кнопка «Дальше» вернёт во «Клиенты».
     """
+    if current == QUALIFIED:
+        return BY_CODE[BREAKDOWN_SENT]
     if current == AGREED:
         return BY_CODE[PAID]
     if current == PACKAGE_DECLINED:
