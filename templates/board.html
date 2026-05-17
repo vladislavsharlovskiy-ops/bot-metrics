@@ -31,12 +31,14 @@
   /* Карточка */
   .card { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px;
           padding: 10px; margin-bottom: 8px; cursor: grab; box-shadow: 0 1px 2px rgba(0,0,0,.04);
-          transition: box-shadow .15s, border-color .15s; }
+          transition: box-shadow .15s, border-color .15s, background .15s; }
   .card:hover { box-shadow: 0 2px 8px rgba(0,0,0,.08); border-color: #cbd5e1; }
   .card.sortable-ghost { opacity: .4; }
   .card.sortable-chosen { cursor: grabbing; }
-  .card.stale { border-left: 3px solid #f59e0b; }
-  .card.very-stale { border-left: 3px solid #ef4444; }
+  /* Залипшие лиды — заливка всей карточки, чтобы бросалось в глаза */
+  .card.stale       { background: #fef3c7; border-color: #fbbf24; }
+  .card.very-stale  { background: #fecaca; border-color: #f87171; }
+  .card.very-stale:hover { background: #fca5a5; }
 
   .card-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
   .card-name { font-weight: 600; font-size: 14px; color: #0f172a;
@@ -229,6 +231,9 @@ function board() {
     },
 
     cardClass(lead) {
+      // Архивные стадии не подсвечиваем — лиды уже «остановлены», нет
+      // смысла отмечать их как «застрявшие».
+      if (lead.stage === 'lost' || lead.stage === 'ignoring') return '';
       const days = Math.floor((Date.now() - new Date(lead.updated_at).getTime()) / 86400000);
       if (days >= 14) return 'very-stale';
       if (days >= 7) return 'stale';
