@@ -9,6 +9,7 @@
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
 <style>
   body { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif; }
+  [x-cloak] { display: none !important; }
   /* Источники — те же цвета что на главной */
   .source-instagram { background: #fce4ec; color: #c2185b; }
   .source-youtube   { background: #ffebee; color: #d32f2f; }
@@ -64,6 +65,54 @@
            border-radius: 6px; font-size: 13px;
            transform: translateY(80px); opacity: 0; transition: all .2s; z-index: 100; }
   .toast.show { transform: translateY(0); opacity: 1; }
+
+  /* Модалка с деталями лида */
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(15,23,42,.5);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 200; padding: 16px;
+  }
+  .modal {
+    background: #fff; border-radius: 12px; max-width: 560px; width: 100%;
+    max-height: 85vh; overflow-y: auto; padding: 20px;
+    box-shadow: 0 10px 40px rgba(0,0,0,.2);
+  }
+  .modal-h { display: flex; justify-content: space-between; align-items: start; gap: 12px; }
+  .modal-h h2 { font-size: 18px; font-weight: 700; color: #0f172a;
+                line-height: 1.3; flex: 1; word-break: break-word; }
+  .modal-close { font-size: 20px; line-height: 1; color: #64748b;
+                 background: none; border: none; cursor: pointer; padding: 0 4px; }
+  .modal-close:hover { color: #0f172a; }
+  .modal-field { margin-top: 12px; }
+  .modal-field-label { font-size: 11px; text-transform: uppercase;
+                       color: #64748b; font-weight: 600; margin-bottom: 4px;
+                       letter-spacing: .03em; }
+  .modal-field-value { font-size: 14px; color: #0f172a; line-height: 1.4;
+                       word-break: break-word; white-space: pre-wrap; }
+  .modal-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+  .modal-tg { display: inline-block; margin-top: 6px; font-size: 13px;
+              padding: 6px 12px; border-radius: 6px;
+              background: #dbeafe; color: #1d4ed8; text-decoration: none; }
+  .modal-tg:hover { background: #bfdbfe; }
+  .modal-notes { width: 100%; min-height: 70px; padding: 8px;
+                 border: 1px solid #cbd5e1; border-radius: 6px;
+                 font-size: 13px; font-family: inherit; resize: vertical;
+                 margin-top: 4px; }
+  .modal-save { margin-top: 8px; font-size: 13px;
+                background: #2563eb; color: #fff; padding: 6px 14px;
+                border: none; border-radius: 6px; cursor: pointer; }
+  .modal-save:hover { background: #1d4ed8; }
+  .modal-section { margin-top: 18px; padding-top: 12px; border-top: 1px solid #f1f5f9; }
+  .modal-section h3 { font-size: 13px; font-weight: 700; color: #334155; margin-bottom: 8px; }
+  .pay-row { display: flex; justify-content: space-between; padding: 6px 0;
+             border-bottom: 1px dashed #e2e8f0; font-size: 13px; }
+  .pay-amount { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .pay-type { font-size: 11px; padding: 1px 6px; border-radius: 3px;
+              background: #ecfccb; color: #4d7c0f; margin-left: 6px; }
+  .pay-type.repeat { background: #ddd6fe; color: #6d28d9; }
+  .hist-row { font-size: 13px; padding: 4px 0; display: flex; gap: 8px; }
+  .hist-time { color: #94a3b8; font-variant-numeric: tabular-nums;
+               white-space: nowrap; min-width: 110px; }
 </style>
 </head>
 <body class="bg-slate-50 text-slate-800">
@@ -102,7 +151,8 @@
         </div>
         <div class="col-body" :data-stage="col.code" x-ref="colBody">
           <template x-for="lead in filteredLeads(col)" :key="lead.id">
-            <div class="card" :data-lead-id="lead.id" :class="cardClass(lead)">
+            <div class="card" :data-lead-id="lead.id" :class="cardClass(lead)"
+                 @click="openModal(lead.id)">
               <div class="card-row">
                 <div class="card-name" x-text="lead.name || lead.username || '—'"></div>
                 <div class="card-id" x-text="'#' + lead.id"></div>
@@ -133,6 +183,99 @@
   </div>
 
   <div class="toast" :class="{show: toastMsg}" x-text="toastMsg"></div>
+
+  <!-- Модалка деталей лида -->
+  <div x-show="modalLead" x-cloak class="modal-backdrop" @click.self="closeModal()">
+    <div class="modal">
+      <template x-if="modalLead">
+        <div>
+          <div class="modal-h">
+            <h2>
+              <span x-text="modalLead.lead.name || modalLead.lead.username || '—'"></span>
+              <span class="text-slate-400 font-normal" x-text="' #' + modalLead.lead.id"></span>
+            </h2>
+            <button class="modal-close" @click="closeModal()">✕</button>
+          </div>
+
+          <span class="src-chip" :class="'source-' + modalLead.lead.source"
+                x-text="modalLead.lead.source_title"></span>
+
+          <template x-if="modalLead.lead.username">
+            <a class="modal-tg"
+               :href="'https://t.me/' + modalLead.lead.username.replace('@','')"
+               target="_blank" rel="noopener">
+              📱 Написать в Telegram (<span x-text="modalLead.lead.username"></span>)
+            </a>
+          </template>
+
+          <div class="modal-row">
+            <div class="modal-field">
+              <div class="modal-field-label">Этап</div>
+              <div class="modal-field-value" x-text="modalLead.lead.stage_title"></div>
+            </div>
+            <div class="modal-field">
+              <div class="modal-field-label">Выручка</div>
+              <div class="modal-field-value font-semibold"
+                   x-text="formatMoney(modalLead.revenue)"></div>
+            </div>
+          </div>
+
+          <div class="modal-row">
+            <div class="modal-field">
+              <div class="modal-field-label">Создан</div>
+              <div class="modal-field-value" x-text="formatDate(modalLead.lead.created_at)"></div>
+            </div>
+            <div class="modal-field">
+              <div class="modal-field-label">Обновлён</div>
+              <div class="modal-field-value" x-text="formatDate(modalLead.lead.updated_at)"></div>
+            </div>
+          </div>
+
+          <div class="modal-field" x-show="modalLead.lead.request">
+            <div class="modal-field-label">Запрос клиента</div>
+            <div class="modal-field-value" x-text="modalLead.lead.request"></div>
+          </div>
+
+          <div class="modal-field" x-show="modalLead.lead.lost_reason">
+            <div class="modal-field-label">Причина отвала</div>
+            <div class="modal-field-value text-red-700" x-text="modalLead.lead.lost_reason"></div>
+          </div>
+
+          <div class="modal-field">
+            <div class="modal-field-label">Заметки</div>
+            <textarea class="modal-notes" x-model="modalNotes"
+                      placeholder="Любые заметки по лиду..."></textarea>
+            <button class="modal-save" @click="saveNotes()">Сохранить заметки</button>
+          </div>
+
+          <div class="modal-section" x-show="modalLead.payments.length">
+            <h3>Оплаты (<span x-text="modalLead.payments.length"></span>)</h3>
+            <template x-for="p in modalLead.payments" :key="p.id">
+              <div class="pay-row">
+                <div>
+                  <span x-text="formatDate(p.paid_at)"></span>
+                  <span class="pay-type" :class="p.type"
+                        x-text="p.type === 'first' ? 'первичка' : 'повторка'"></span>
+                  <span class="text-slate-500 text-xs" x-text="p.product"></span>
+                </div>
+                <div class="pay-amount" x-text="formatMoney(p.amount) + ' ' + p.currency"></div>
+              </div>
+            </template>
+          </div>
+
+          <div class="modal-section" x-show="modalLead.history.length">
+            <h3>История этапов</h3>
+            <template x-for="h in modalLead.history" :key="h.changed_at + h.stage">
+              <div class="hist-row">
+                <span class="hist-time" x-text="formatDate(h.changed_at)"></span>
+                <span x-text="h.stage_title"></span>
+              </div>
+            </template>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -145,6 +288,13 @@ function board() {
     toastTimer: null,
     updatedHint: '',
     sortables: [],
+    // Модалка с деталями лида
+    modalLead: null,    // {lead, history, payments, revenue} или null
+    modalNotes: '',
+    // Drag-vs-click guard: SortableJS обрабатывает drag, click на карточке
+    // должен открыть модалку. После реального drag не открываем модалку,
+    // иначе после перетаскивания карточка сразу разворачивается.
+    suppressNextClickUntil: 0,
 
     async init() {
       // Загрузка справочника источников + первая загрузка доски
@@ -176,16 +326,70 @@ function board() {
           animation: 150,
           ghostClass: 'sortable-ghost',
           chosenClass: 'sortable-chosen',
+          // 100ms задержка позволяет различить tap (короткое нажатие
+          // → click → модалка) от drag (нажатие+движение).
+          delay: 100,
+          delayOnTouchOnly: false,
           onEnd: async (evt) => {
             const leadId = evt.item.dataset.leadId;
             const newStage = evt.to.dataset.stage;
             const oldStage = evt.from.dataset.stage;
+            // После любого drag-end подавляем click на следующие 300ms,
+            // иначе браузер отправит click событие на отпущенный элемент
+            // → модалка откроется случайно.
+            this.suppressNextClickUntil = Date.now() + 300;
             if (newStage === oldStage) return;
             await this.moveLead(leadId, newStage);
           }
         });
         this.sortables.push(s);
       });
+    },
+
+    async openModal(leadId) {
+      if (Date.now() < this.suppressNextClickUntil) return;
+      try {
+        const r = await fetch(`/api/leads/${leadId}/full`);
+        if (!r.ok) throw new Error('http ' + r.status);
+        const d = await r.json();
+        this.modalLead = d;
+        this.modalNotes = d.lead.notes || '';
+      } catch (e) {
+        this.showToast('⚠ ' + e.message);
+      }
+    },
+
+    closeModal() {
+      this.modalLead = null;
+      this.modalNotes = '';
+    },
+
+    async saveNotes() {
+      if (!this.modalLead) return;
+      const id = this.modalLead.lead.id;
+      try {
+        const r = await fetch(`/api/leads/${id}/note`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({notes: this.modalNotes})
+        });
+        if (!r.ok) throw new Error('http ' + r.status);
+        this.modalLead.lead.notes = this.modalNotes;
+        this.showToast('✅ Заметки сохранены');
+      } catch (e) {
+        this.showToast('⚠ ' + e.message);
+      }
+    },
+
+    formatMoney(amount) {
+      if (!amount) return '0 ₽';
+      return Math.round(amount).toLocaleString('ru-RU').replace(/ /g, ' ') + ' ₽';
+    },
+
+    formatDate(iso) {
+      if (!iso) return '—';
+      const d = new Date(iso);
+      return d.toLocaleString('ru-RU', {day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit'});
     },
 
     async moveLead(leadId, stage) {
