@@ -634,6 +634,74 @@ def api_requests_csv():
     return response
 
 
+@app.get("/api/leads/<int:lead_id>/full")
+def api_lead_full(lead_id: int):
+    """Полная карточка лида для модалки на Канбан-доске.
+    Включает данные лида, историю переходов по этапам, привязанные
+    Payment'ы (через lead напрямую или через client→lead) и суммарную
+    выручку.
+    """
+    with get_session() as session:
+        lead = session.get(Lead, lead_id)
+        if not lead:
+            return jsonify({"error": "not found"}), 404
+
+        history_rows = session.execute(
+            select(StageHistory)
+            .where(StageHistory.lead_id == lead_id)
+            .order_by(StageHistory.changed_at.desc())
+        ).scalars().all()
+        history = [
+            {
+                "stage": h.stage,
+                "stage_title": BY_CODE.get(h.stage).title if BY_CODE.get(h.stage) else h.stage,
+                "changed_at": h.changed_at.isoformat(timespec="minutes"),
+            }
+            for h in history_rows
+        ]
+
+        client_ids = [
+            cid for (cid,) in session.execute(
+                select(Client.id).where(Client.lead_id == lead_id)
+            ).all()
+        ]
+        # Платежи: либо привязаны к лиду напрямую, либо через client
+        # (только без lead_id чтобы не дублировать).
+        payments = list(session.execute(
+            select(Payment)
+            .where(Payment.lead_id == lead_id)
+            .where(Payment.payment_type.in_(["first", "repeat"]))
+            .order_by(Payment.paid_at.desc())
+        ).scalars().all())
+        if client_ids:
+            payments.extend(session.execute(
+                select(Payment)
+                .where(Payment.client_id.in_(client_ids))
+                .where(Payment.lead_id.is_(None))
+                .where(Payment.payment_type.in_(["first", "repeat"]))
+                .order_by(Payment.paid_at.desc())
+            ).scalars().all())
+        payments_out = [
+            {
+                "id": p.id,
+                "amount": float(p.amount or 0),
+                "currency": p.currency,
+                "type": p.payment_type,
+                "paid_at": p.paid_at.isoformat(timespec="minutes") if p.paid_at else None,
+                "product": p.product or "",
+            }
+            for p in payments
+        ]
+        revenue = sum(p["amount"] for p in payments_out)
+
+    return jsonify({
+        "lead": _lead_dict(lead),
+        "history": history,
+        "payments": payments_out,
+        "revenue": revenue,
+    })
+
+
 @app.post("/api/leads/<int:lead_id>/move")
 def api_move(lead_id: int):
     """Универсальный переход лида в произвольный этап.
